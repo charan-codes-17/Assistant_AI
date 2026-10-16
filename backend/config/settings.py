@@ -1,76 +1,60 @@
 from pathlib import Path
-from typing import Optional
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
 
-# Project root calculation:
-# backend/config/settings.py -> backend/config -> backend -> root
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/config/settings.py -> config -> backend -> repo root
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
 
 class Settings(BaseSettings):
-    """Application configuration loaded from environment variables and .env file."""
+    """Application configuration, loaded from the repo-root .env (and real env vars)."""
 
-    # Nebius Token Factory API
-    NEBIUS_API_KEY: str = Field(
-        default="",
-        description="API key for Nebius Token Factory",
-    )
+    # Environment
+    APP_ENV: str = Field(default="dev", description="dev | prod")
+
+    # Nebius Token Factory (OpenAI-compatible)
+    NEBIUS_API_KEY: str = Field(default="", description="Nebius Token Factory API key")
     NEBIUS_BASE_URL: str = Field(
         default="https://api.tokenfactory.us-central1.nebius.com/v1/",
-        description="Base URL for Nebius Token Factory OpenAI-compatible API",
     )
 
-    # Model IDs (Never hardcoded in logic)
+    # Chat model IDs: verify exact IDs in the Nebius console; never hardcode in services.
     CHAT_MODEL_FAST: str = Field(
-        default="nvidia/nemotron-3-super-120b-a12b",
-        description="Fast tier model for routing, extraction, and onboarding",
+        description="Fast tier: routing, extraction, onboarding, plain chat",
     )
     CHAT_MODEL_REASONING: str = Field(
-        default="Llama-3_1-Nemotron-Ultra-253B-v1",
-        description="Reasoning tier model for relevance judgment and intervention",
+        description="Reasoning tier: relevance judgment and intervention",
     )
+    # Optional non-reasoning model for the tool-calling step (roadmap §16 Risk 1)
+    CHAT_MODEL_TOOLCALL: str = Field(default="", description="Falls back to FAST if empty")
 
-    # Embedding model and dimension
-    EMBEDDING_MODEL: str = Field(
-        default="sentence-transformers/all-MiniLM-L6-v2",
-        description="Embedding model identifier",
-    )
-    EMBEDDING_DIM: int = Field(
-        default=384,
-        description="Vector embedding dimension",
-    )
+    # Embeddings: dimension MUST match the model; it is baked into the DB schema.
+    EMBEDDING_MODEL: str = Field(description="Embedding model ID")
+    EMBEDDING_DIM: int = Field(description="Vector dimension of EMBEDDING_MODEL")
 
-    # Telegram bot
-    TELEGRAM_BOT_TOKEN: str = Field(
-        default="",
-        description="Telegram bot token from BotFather",
-    )
+    # Telegram
+    TELEGRAM_BOT_TOKEN: str = Field(default="", description="Dev or deployed bot token")
 
     # Database
     DATABASE_URL: str = Field(
         default="postgresql+asyncpg://postgres:postgres@localhost:5432/ai_assistant",
-        description="PostgreSQL async connection string",
     )
 
-    # Security & Authentication
-    JWT_SECRET: str = Field(
-        default="dev-secret-key-change-in-production",
-        description="Secret key for signing JWT tokens",
-    )
+    # Auth (needed from Phase 7; no insecure default)
+    JWT_SECRET: str = Field(default="", description="Required in Phase 7")
 
     model_config = SettingsConfigDict(
-        env_file=(
-            str(ROOT_DIR / ".env"),
-            str(ROOT_DIR / "config" / ".env"),
-            str(Path(__file__).resolve().parent.parent / ".env"),
-            ".env",
-            "config/.env",
-        ),
+        env_file=str(ROOT_DIR / ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
+    def require(self, *names: str) -> None:
+        """Fail loudly if any named setting is empty. Call at the top of scripts/entrypoints."""
+        missing = [n for n in names if not getattr(self, n)]
+        if missing:
+            raise RuntimeError(f"Missing required settings in .env: {', '.join(missing)}")
+
 
 settings = Settings()
-
