@@ -118,23 +118,25 @@ Rules:
 1. ONLY extract what the USER said about themselves, their goals, learning, decisions, preferences, terms they define, and commitments.
    - Never extract facts from the assistant, general-knowledge questions (e.g., "what is the capital of France?"), or small talk (e.g., "thanks!").
    - If nothing durable was said, return empty lists for records and tasks.
-2. Learning / Stuck on a topic:
-   - A statement of wanting to learn or being stuck on a topic is a knowledge record with certainty "tentative" (e.g., "learning: mathematical functions", "stuck on: calculus").
-3. Decisions:
-   - A decision made by the user is a decision record with certainty "decided" (e.g., "decided to use Postgres").
+2. Content phrasing (Third Person):
+   - Each record's content MUST be a short, self-contained statement written in the third person, e.g., "User is learning mathematical functions", "User prefers short answers", "User decided to use Postgres".
+3. Learning / Stuck on a topic:
+   - A statement of wanting to learn or being stuck on a topic is a knowledge record with certainty "tentative" (e.g., "User is learning mathematical functions", "User is stuck on calculus").
+4. Decisions:
+   - A decision made by the user is a decision record with certainty "decided" (e.g., "User decided to use Postgres").
    - Extract a rationale ONLY if the user explicitly stated one (e.g., "because it supports pgvector"). Never invent or hallucinate a rationale.
-4. Commitments & Promises:
+5. Commitments & Promises:
    - Commitments the user makes to do something (e.g., "I'll send Arun the PDF tomorrow", "I'll email Prof. Rao by Monday") MUST become a CandidateTask with origin="promise".
    - Do NOT create a duplicate knowledge record for a promise task.
    - Resolve relative dates against the current user local time ({local_date_str}, {weekday}).
    - If no time of day is given, default to 09:00:00 local time.
    - Format due_at as an ISO 8601 string with the local timezone offset (e.g., "2026-10-18T09:00:00+05:30").
    - If the date is ambiguous or absent, leave due_at null.
-5. Grounding & Anti-Hallucination:
+6. Grounding & Anti-Hallucination:
    - Content MUST be strictly grounded in the user's words.
    - NEVER add details, dates, reasons, topics, or names that the user did not say.
-6. Rambling voice-style text:
-   - Rambling voice-style text is cleaned into a short, plain statement without conversational filler ("um", "like", "so yeah"), while preserving only what the user actually said.
+7. Rambling voice-style text:
+   - Rambling voice-style text is cleaned into a short, plain statement in third person without conversational filler ("um", "like", "so yeah"), while preserving only what the user actually said.
 
 Output format:
 Respond with strict JSON matching:
@@ -142,7 +144,7 @@ Respond with strict JSON matching:
   "records": [
     {{
       "kind": "knowledge" | "decision" | "preference" | "glossary",
-      "content": "short grounded statement",
+      "content": "short self-contained third-person statement, e.g. User is learning ...",
       "certainty": "idea" | "tentative" | "decided",
       "rationale": "stated reason or null"
     }}

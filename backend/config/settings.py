@@ -45,6 +45,20 @@ class Settings(BaseSettings):
         description="Cosine similarity threshold for deduplicating knowledge records",
     )
 
+    # Retrieval & Relevance
+    RETRIEVAL_TOP_K: int = Field(
+        default=5,
+        description="Max candidate records to retrieve from vector search",
+    )
+    RETRIEVAL_MIN_SIMILARITY: float = Field(
+        default=0.55,
+        description="Minimum cosine similarity for retrieval candidates",
+    )
+    RELEVANCE_MIN_CONFIDENCE: int = Field(
+        default=50,
+        description="Minimum confidence score (0-100) for relevance judgment",
+    )
+
     # Auth (needed from Phase 7; no insecure default)
     JWT_SECRET: str = Field(default="", description="Required in Phase 7")
 
