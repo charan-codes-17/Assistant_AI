@@ -1,3 +1,18 @@
+> **Overrides (Oct 17, 2026), these win over anything below:**
+> - Dev database is hosted Neon Postgres + pgvector, not Docker. Ignore Docker/docker-compose steps.
+> - Nebius base URL: https://api.tokenfactory.nebius.com/v1/
+> - Chat models: nvidia/nemotron-3-super-120b-a12b for both fast and reasoning tiers (native tool calling works). Do not use Ultra or Nano.
+> - Embeddings: Qwen/Qwen3-Embedding-8B with dimensions=1024 always passed (vector(1024)).
+> - Python is 3.14 locally; faster-whisper audio decoding uses PyAV directly (see spike_telegram.py).
+
+
+
+
+
+
+
+
+
 # Product Requirements Document (PRD) — Persistent-Memory Personal AI Assistant
 
 **Event:** Nebius x NVIDIA Global AI Hackathon — Personal AI Track

@@ -1,3 +1,16 @@
+> **Overrides (Oct 17, 2026), these win over anything below:**
+> - Dev database is hosted Neon Postgres + pgvector, not Docker. Ignore Docker/docker-compose steps.
+> - Nebius base URL: https://api.tokenfactory.nebius.com/v1/
+> - Chat models: nvidia/nemotron-3-super-120b-a12b for both fast and reasoning tiers (native tool calling works). Do not use Ultra or Nano.
+> - Embeddings: Qwen/Qwen3-Embedding-8B with dimensions=1024 always passed (vector(1024)).
+> - Python is 3.14 locally; faster-whisper audio decoding uses PyAV directly (see spike_telegram.py).
+
+
+
+
+
+
+
 # Project Build Roadmap — Persistent-Memory Personal AI Assistant
 ### Nebius x NVIDIA Global AI Hackathon — Personal AI Track
 
@@ -316,7 +329,7 @@ npm install axios zustand lucide-react
 ### APIs / SDKs
 | Provider | SDK | Auth | What you call |
 |---|---|---|---|
-| Nebius Token Factory | `openai` Python SDK, pointed at `base_url="https://api.tokenfactory.us-central1.nebius.com/v1/"` | `NEBIUS_API_KEY` env var | `/chat/completions` for all 4 Nemotron calls (routing, extraction, retrieval judgment, intervention judgment); `/embeddings` for memory vectors (verify the exact embedding model ID and that the endpoint is exposed in the console) |
+| Nebius Token Factory | `openai` Python SDK, pointed at `base_url="https://api.tokenfactory.nebius.com/v1/"` | `NEBIUS_API_KEY` env var | `/chat/completions` for all 4 Nemotron calls (routing, extraction, retrieval judgment, intervention judgment); `/embeddings` for memory vectors (verify the exact embedding model ID and that the endpoint is exposed in the console) |
 | Telegram Bot API | `python-telegram-bot` | `TELEGRAM_BOT_TOKEN` env var (from BotFather) | Receive updates (long polling), send messages, inline keyboards, download voice files |
 | Free external APIs (stretch only) | `httpx` | Open-Meteo needs none; Google Calendar needs OAuth | Weather for the morning brief; calendar read-only is **Future**, not MVP |
 
