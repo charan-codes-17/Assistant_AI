@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # Deduplication
     DEDUPE_THRESHOLD: float = Field(
-        default=0.85,
+        default=0.90,
         description="Cosine similarity threshold for deduplicating knowledge records",
     )
 

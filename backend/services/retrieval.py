@@ -3,6 +3,7 @@ Relevance retrieval service with tool-calling schema and reasoning-tier judgment
 Performs pgvector search on confirmed knowledge records followed by LLM relevance scoring.
 """
 
+import asyncio
 from datetime import datetime, timezone
 import json
 import logging
@@ -81,6 +82,7 @@ class RetrievalResult(BaseModel):
     items: List[RetrievedItem] = Field(default_factory=list)
     candidates_considered: int = 0
     timings: Dict[str, float] = Field(default_factory=dict)
+    timed_out: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,7 @@ async def retrieve_memory(
     user: User,
     query: str,
     now: Optional[datetime] = None,
+    timeout: float = 10.0,
 ) -> RetrievalResult:
     """Retrieve confirmed memories relevant to the query.
 
@@ -141,122 +144,150 @@ async def retrieve_memory(
        Keep relevant=True AND confidence >= settings.RELEVANCE_MIN_CONFIDENCE, sorted descending.
     5. Fail closed if chat_json returns None: log and return empty result.
     6. Record per-step timings (embed, search, judge) in result.timings.
+    7. Whole function is wrapped in asyncio.wait_for(timeout=timeout). On timeout, logs warning and returns
+       empty RetrievalResult(timed_out=True).
     """
-    timings: Dict[str, float] = {}
+    async def _do_retrieve() -> RetrievalResult:
+        timings: Dict[str, float] = {}
 
-    # Step 1: Embed the query
-    t_embed_start = time.perf_counter()
-    query_embeddings = await embed_texts([query])
-    if not query_embeddings:
-        return RetrievalResult(items=[], candidates_considered=0, timings={"embed": 0.0, "search": 0.0, "judge": 0.0})
-    query_vec = query_embeddings[0]
-    timings["embed"] = round(time.perf_counter() - t_embed_start, 4)
+        # Step 1: Embed the query
+        t_embed_start = time.perf_counter()
+        query_embeddings = await embed_texts([query])
+        if not query_embeddings:
+            return RetrievalResult(
+                items=[],
+                candidates_considered=0,
+                timings={"embed": 0.0, "search": 0.0, "judge": 0.0},
+                timed_out=False,
+            )
+        query_vec = query_embeddings[0]
+        timings["embed"] = round(time.perf_counter() - t_embed_start, 4)
 
-    # Step 2: Search confirmed candidates
-    t_search_start = time.perf_counter()
-    candidates = await search_confirmed(
-        session=session,
-        user_id=user.id,
-        query_embedding=query_vec,
-        k=settings.RETRIEVAL_TOP_K,
-        min_similarity=settings.RETRIEVAL_MIN_SIMILARITY,
-    )
-    timings["search"] = round(time.perf_counter() - t_search_start, 4)
-
-    if not candidates:
-        timings["judge"] = 0.0
-        return RetrievalResult(items=[], candidates_considered=0, timings=timings)
-
-    # Step 3: Relevance judgment with REASONING tier via chat_json
-    candidate_map: Dict[int, tuple[KnowledgeRecord, float]] = {
-        rec.id: (rec, sim) for rec, sim in candidates
-    }
-
-    candidates_text_lines: List[str] = []
-    for rec, sim in candidates:
-        created_str = (
-            rec.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-            if rec.created_at
-            else "unknown"
+        # Step 2: Search confirmed candidates
+        t_search_start = time.perf_counter()
+        candidates = await search_confirmed(
+            session=session,
+            user_id=user.id,
+            query_embedding=query_vec,
+            k=settings.RETRIEVAL_TOP_K,
+            min_similarity=settings.RETRIEVAL_MIN_SIMILARITY,
         )
-        candidates_text_lines.append(
-            f"ID: {rec.id}\n"
-            f"Content: {rec.content}\n"
-            f"Kind: {rec.kind}\n"
-            f"Certainty: {rec.certainty}\n"
-            f"Created: {created_str}\n"
-            f"Similarity Score: {sim:.4f}"
+        timings["search"] = round(time.perf_counter() - t_search_start, 4)
+
+        if not candidates:
+            timings["judge"] = 0.0
+            return RetrievalResult(
+                items=[],
+                candidates_considered=0,
+                timings=timings,
+                timed_out=False,
+            )
+
+        # Step 3: Relevance judgment with REASONING tier via chat_json
+        candidate_map: Dict[int, tuple[KnowledgeRecord, float]] = {
+            rec.id: (rec, sim) for rec, sim in candidates
+        }
+
+        candidates_text_lines: List[str] = []
+        for rec, sim in candidates:
+            created_str = (
+                rec.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                if rec.created_at
+                else "unknown"
+            )
+            candidates_text_lines.append(
+                f"ID: {rec.id}\n"
+                f"Content: {rec.content}\n"
+                f"Kind: {rec.kind}\n"
+                f"Certainty: {rec.certainty}\n"
+                f"Created: {created_str}\n"
+                f"Similarity Score: {sim:.4f}"
+            )
+        candidates_block = "\n---\n".join(candidates_text_lines)
+
+        user_prompt = (
+            f"<query_data>\n{query}\n</query_data>\n\n"
+            f"<candidate_memories_data>\n{candidates_block}\n</candidate_memories_data>"
         )
-    candidates_block = "\n---\n".join(candidates_text_lines)
 
-    user_prompt = (
-        f"<query_data>\n{query}\n</query_data>\n\n"
-        f"<candidate_memories_data>\n{candidates_block}\n</candidate_memories_data>"
-    )
+        messages = [
+            {"role": "system", "content": JUDGMENT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
 
-    messages = [
-        {"role": "system", "content": JUDGMENT_SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt},
-    ]
+        t_judge_start = time.perf_counter()
+        judgment_res = await chat_json(tier="reasoning", messages=messages, schema=JudgmentResult)
+        timings["judge"] = round(time.perf_counter() - t_judge_start, 4)
 
-    t_judge_start = time.perf_counter()
-    judgment_res = await chat_json(tier="reasoning", messages=messages, schema=JudgmentResult)
-    timings["judge"] = round(time.perf_counter() - t_judge_start, 4)
+        # Step 5: Fail closed if chat_json returns None
+        if judgment_res is None:
+            logger.warning(
+                "Relevance judgment failed closed (chat_json returned None). Returning empty result."
+            )
+            return RetrievalResult(
+                items=[],
+                candidates_considered=len(candidates),
+                timings=timings,
+                timed_out=False,
+            )
 
-    # Step 5: Fail closed if chat_json returns None
-    if judgment_res is None:
+        # Step 4: Validate judgments
+        seen_ids: set[int] = set()
+        kept_items: List[RetrievedItem] = []
+
+        for j in judgment_res.judgments:
+            # Discard any judgment whose id is not in the candidate set
+            if j.id not in candidate_map:
+                logger.debug("Discarding judgment for unknown ID %s", j.id)
+                continue
+
+            # Ignore duplicate judgments for the same candidate
+            if j.id in seen_ids:
+                continue
+            seen_ids.add(j.id)
+
+            # Clamp confidence to 0-100
+            clamped_conf = max(0, min(100, int(j.confidence)))
+
+            # Filter by relevant=true and confidence >= RELEVANCE_MIN_CONFIDENCE
+            if j.relevant and clamped_conf >= settings.RELEVANCE_MIN_CONFIDENCE:
+                rec, sim = candidate_map[j.id]
+                kept_items.append(
+                    RetrievedItem(
+                        record_id=rec.id,
+                        content=rec.content,
+                        kind=rec.kind,
+                        certainty=rec.certainty,
+                        created_at=rec.created_at,
+                        source=rec.source,
+                        similarity=sim,
+                        confidence=clamped_conf,
+                        reason=j.reason,
+                    )
+                )
+
+        # Sort kept items by confidence descending
+        kept_items.sort(key=lambda item: item.confidence, reverse=True)
+
+        return RetrievalResult(
+            items=kept_items,
+            candidates_considered=len(candidates),
+            timings=timings,
+            timed_out=False,
+        )
+
+    try:
+        return await asyncio.wait_for(_do_retrieve(), timeout=timeout)
+    except asyncio.TimeoutError:
         logger.warning(
-            "Relevance judgment failed closed (chat_json returned None). Returning empty result."
+            "retrieve_memory timed out after %.2f seconds for query %r", timeout, query
         )
         return RetrievalResult(
             items=[],
-            candidates_considered=len(candidates),
-            timings=timings,
+            candidates_considered=0,
+            timings={},
+            timed_out=True,
         )
-
-    # Step 4: Validate judgments
-    seen_ids: set[int] = set()
-    kept_items: List[RetrievedItem] = []
-
-    for j in judgment_res.judgments:
-        # Discard any judgment whose id is not in the candidate set
-        if j.id not in candidate_map:
-            logger.debug("Discarding judgment for unknown ID %s", j.id)
-            continue
-
-        # Ignore duplicate judgments for the same candidate
-        if j.id in seen_ids:
-            continue
-        seen_ids.add(j.id)
-
-        # Clamp confidence to 0-100
-        clamped_conf = max(0, min(100, int(j.confidence)))
-
-        # Filter by relevant=true and confidence >= RELEVANCE_MIN_CONFIDENCE
-        if j.relevant and clamped_conf >= settings.RELEVANCE_MIN_CONFIDENCE:
-            rec, sim = candidate_map[j.id]
-            kept_items.append(
-                RetrievedItem(
-                    record_id=rec.id,
-                    content=rec.content,
-                    kind=rec.kind,
-                    certainty=rec.certainty,
-                    created_at=rec.created_at,
-                    source=rec.source,
-                    similarity=sim,
-                    confidence=clamped_conf,
-                    reason=j.reason,
-                )
-            )
-
-    # Sort kept items by confidence descending
-    kept_items.sort(key=lambda item: item.confidence, reverse=True)
-
-    return RetrievalResult(
-        items=kept_items,
-        candidates_considered=len(candidates),
-        timings=timings,
-    )
 
 
 def tool_result_for_model(result: RetrievalResult) -> str:

@@ -461,6 +461,62 @@ async def main() -> None:
                 "detail": f"Pending record excluded from search_confirmed ({lat10}s)",
             })
 
+            # -------------------------------------------------------------
+            # Case 11: Dedupe threshold (0.90): learning vs know well
+            # -------------------------------------------------------------
+            print("Running Case 11: Dedupe threshold 0.90 (learning vs know well)...")
+            user_c11 = await create_test_user(session, "c11")
+            users_to_cleanup.append(user_c11.id)
+
+            # Seed confirmed record "User is learning mathematical functions"
+            seeded_texts = ["User is learning mathematical functions"]
+            seeded_vecs = await embed_texts(seeded_texts)
+            rec_c11 = KnowledgeRecord(
+                user_id=user_c11.id,
+                kind="knowledge",
+                content=seeded_texts[0],
+                certainty="tentative",
+                source="text",
+                status="confirmed",
+                embedding=seeded_vecs[0],
+            )
+            session.add(rec_c11)
+            await session.commit()
+            await session.refresh(rec_c11)
+
+            t0 = time.perf_counter()
+            res11 = await extract_and_stage(
+                session=session,
+                user=user_c11,
+                text="I know mathematical functions well now",
+                source="text",
+                now=FIXED_NOW,
+            )
+            lat11 = round(time.perf_counter() - t0, 2)
+
+            # Compute matched similarity between seeded record and extracted candidate
+            matched_sim = 0.0
+            if res11.staged_records and res11.staged_records[0].embedding is not None:
+                matched_sim = cosine_similarity(
+                    list(rec_c11.embedding),
+                    list(res11.staged_records[0].embedding),
+                )
+            print(f"   Case 11 matched similarity: {matched_sim:.4f} (threshold: {settings.DEDUPE_THRESHOLD})")
+
+            c11_pass = (
+                len(res11.staged_records) == 1
+                and res11.staged_records[0].status == "pending"
+                and len(res11.duplicates) == 0
+            )
+            results.append({
+                "id": "Case-11",
+                "name": "Dedupe threshold: learning vs know well",
+                "expected": f"1 new pending record, sim < {settings.DEDUPE_THRESHOLD}",
+                "actual": f"staged={len(res11.staged_records)}, duplicates={len(res11.duplicates)}",
+                "status": "PASS" if c11_pass else "FAIL",
+                "detail": f"staged={len(res11.staged_records)}, matched_sim={matched_sim:.4f} < {settings.DEDUPE_THRESHOLD} ({lat11}s)",
+            })
+
         finally:
             print("\nCleaning up all throwaway users...")
             for uid in users_to_cleanup:
