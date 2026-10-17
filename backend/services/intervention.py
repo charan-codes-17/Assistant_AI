@@ -167,9 +167,8 @@ Rules and Design Safeguards:
    - message must be at most TWO plain sentences.
    - Strictly NO emojis, NO praise, NO flattery, NO simulated emotion, and NO exclamation marks.
 3. remind action:
-   - ONLY for the scheduler trigger, for an open task that is due within 24 hours or overdue.
+   - ONLY for the scheduler trigger. Never set action="remind" on a conversation trigger.
    - Set target_task_id to the task ID.
-   - Provide a concise reminder message to the user mentioning the specific task name/details (e.g. "Reminder: send Arun the PDF is due today.").
 4. surface action:
    - ONLY when a retrieved memory has confidence >= 70 and is clearly useful to surface even though the user did not ask for it.
    - Set surfaced_record_id to that memory record's ID.
@@ -222,6 +221,58 @@ Respond with strict JSON matching:
 # ---------------------------------------------------------------------------
 # Decision Logic
 # ---------------------------------------------------------------------------
+
+def _format_reminder_time(local_due: datetime, local_now: datetime) -> str:
+    """Format a due datetime as a natural-language string relative to now.
+
+    Examples:
+      - Same calendar day -> "today at 3:30 PM"
+      - Next calendar day -> "tomorrow at 9:00 AM"
+      - Within the next 7 days -> "Friday at 9:00 AM"
+      - Further away -> "Oct 25 at 9:00 AM"
+    The returned string never contains a raw ISO timestamp or timezone abbreviation.
+    """
+    # Cross-platform: format hour without leading zero.
+    # %I gives "09", we strip the leading zero → "9:00 AM"
+    raw_time = local_due.strftime("%I:%M %p")  # e.g. "09:00 AM"
+    time_part = raw_time.lstrip("0") or raw_time  # guard against "00:xx" edge case
+
+    due_date = local_due.date()
+    now_date = local_now.date()
+    days_diff = (due_date - now_date).days
+
+    if days_diff == 0:
+        return f"today at {time_part}"
+    elif days_diff == 1:
+        return f"tomorrow at {time_part}"
+    elif 2 <= days_diff <= 6:
+        return f"{local_due.strftime('%A')} at {time_part}"
+    else:
+        return f"{local_due.strftime('%b')} {local_due.day} at {time_part}"
+
+
+# STOP_WORDS: articles and prepositions that are not "significant" in the title
+_TITLE_STOP_WORDS = frozenset({"the", "a", "an", "of", "to", "for", "in", "on", "at", "by", "and", "or"})
+
+
+def _title_in_message(title: str, message: str) -> bool:
+    """Return True if all significant words of the task title appear in the message (case-insensitive).
+
+    Significant words are those not in _TITLE_STOP_WORDS and at least 2 characters long.
+    Falls back to checking the full title as a substring.
+    """
+    title_lower = title.lower()
+    message_lower = message.lower()
+    # Fast path: exact substring
+    if title_lower in message_lower:
+        return True
+    # Check significant words individually
+    words = re.findall(r"[a-z0-9']+", title_lower)
+    significant = [w for w in words if w not in _TITLE_STOP_WORDS and len(w) >= 2]
+    if not significant:
+        return title_lower in message_lower
+    return all(word in message_lower for word in significant)
+
 
 def _strip_sentences(text: Optional[str], max_sentences: int = 2) -> Optional[str]:
     """Clean emojis, replace exclamation marks, and truncate text to at most max_sentences."""
@@ -343,8 +394,17 @@ async def decide_intervention(
             user_tz = timezone.utc
 
         local_due = task_due.astimezone(user_tz)
-        local_time_str = local_due.strftime("%Y-%m-%d %H:%M %Z").strip()
-        templated_message = f"Reminder: {task.title} is due {local_time_str}"
+        local_now = ref_now.astimezone(user_tz)
+
+        # Natural-language time formatting
+        is_overdue = local_due < local_now
+        when_str = _format_reminder_time(local_due, local_now)
+
+        # Grammatical templates — work correctly for any title
+        if is_overdue:
+            templated_message = f"Reminder: {task.title} was due {when_str}."
+        else:
+            templated_message = f"Reminder: {task.title}, due {when_str}."
 
         phrasing_system = (
             "You are the reminder phrasing engine for a personal AI assistant.\n"
@@ -352,11 +412,16 @@ async def decide_intervention(
             "Rules:\n"
             "1. At most TWO plain sentences.\n"
             "2. Strictly NO emojis, NO praise, NO simulated emotion, and NO exclamation marks.\n"
-            f"3. MUST mention the task title '{task.title}' and the local due time '{local_time_str}'.\n"
+            f"3. MUST mention the task title '{task.title}' (exact wording) and the preformatted time '{when_str}'.\n"
+            "4. Use the preformatted time string exactly as given. Do NOT reformat, convert, or alter dates or times.\n"
+            "5. Do NOT include any timezone abbreviation or raw date/time string other than the one provided.\n"
             "Respond with strict JSON matching:\n"
             '{\n  "message": "<plain text message>"\n}'
         )
-        phrasing_user = f"Phrase a reminder message for: task '{task.title}' due at {local_time_str}."
+        phrasing_user = (
+            f"Phrase a reminder message for: task '{task.title}', "
+            f"{'which was due' if is_overdue else 'due'} {when_str}."
+        )
 
         phrased_msg: Optional[str] = None
         phrased_reason: Optional[str] = None
@@ -376,7 +441,7 @@ async def decide_intervention(
                 raw_m = getattr(resp, "message", None) or (resp.get("message") if isinstance(resp, dict) else None)
                 if raw_m and isinstance(raw_m, str) and raw_m.strip():
                     candidate_msg = _strip_sentences(raw_m, max_sentences=2)
-                    if candidate_msg and task.title.lower() in candidate_msg.lower():
+                    if candidate_msg and _title_in_message(task.title, candidate_msg):
                         phrased_msg = candidate_msg
                 phrased_reason = getattr(resp, "reason", None) or (resp.get("reason") if isinstance(resp, dict) else None)
         except Exception as exc:
@@ -440,14 +505,19 @@ async def decide_intervention(
         {"role": "user", "content": user_prompt},
     ]
 
-    # Call reasoning tier with 15-second timeout, failing closed to none
+    # Call reasoning tier with configurable timeout, failing closed to none
+    # INTERVENTION_TIMEOUT_SECONDS defaults to 30 (set in settings). Runs after the reply is
+    # already sent, so latency does not block the user.
     try:
         decision = await asyncio.wait_for(
             chat_json(tier="reasoning", messages=messages, schema=InterventionDecision),
-            timeout=15.0,
+            timeout=settings.INTERVENTION_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        logger.warning("Conversation intervention LLM call timed out after 15s. Failing closed.")
+        logger.warning(
+            "Conversation intervention LLM call timed out after %.2fs. Failing closed.",
+            settings.INTERVENTION_TIMEOUT_SECONDS,
+        )
         return InterventionDecision(action="none", reason="Conversation reasoning timed out")
     except Exception as exc:
         logger.warning("Conversation intervention LLM call failed: %s. Failing closed.", exc)
@@ -463,15 +533,24 @@ async def decide_intervention(
     goal_ids = {g["id"] for g in goals_ctx}
     retrieved_map = {it.record_id: it for it in retrieval_items}
 
-    # Validate remind in conversation (remind is scheduler-only or requires valid task)
+    # Unconditionally downgrade "remind" on conversation turns.
+    # Reminders are exclusively decided by the scheduler code guards (REMINDER_LEAD_MINUTES).
     if decision.action == "remind":
-        target_id = decision.target_task_id
-        if target_id not in context_task_ids:
-            logger.warning("Invalid target_task_id %s for remind; downgrading to none.", target_id)
+        sid = decision.surfaced_record_id
+        if sid is not None and sid in retrieved_map and retrieved_map[sid].confidence >= 70:
+            logger.warning(
+                "Conversation turn: LLM returned action='remind'; downgrading to 'surface' "
+                "(valid surfaced_record_id=%s). Reminders are scheduler-only.",
+                sid,
+            )
+            decision.action = "surface"
+        else:
+            logger.warning(
+                "Conversation turn: LLM returned action='remind'; downgrading to 'none'. "
+                "Reminders are decided exclusively by the scheduler."
+            )
             decision.action = "none"
             decision.target_task_id = None
-        else:
-            decision.target_task_id = target_id
 
     # Validate act
     if decision.action == "act":

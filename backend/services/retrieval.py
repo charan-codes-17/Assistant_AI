@@ -92,20 +92,26 @@ class RetrievalResult(BaseModel):
 JUDGMENT_SYSTEM_PROMPT = """You are the relevance judgment engine for a personal AI assistant.
 Your task is to evaluate candidate memory records against a user's query and judge whether each memory is truly relevant, assigning a confidence score from 0 to 100.
 
+A memory is relevant if it would materially change or improve the answer to the current message. Ask yourself:
+  - Is this prerequisite knowledge the user already has that should shape how you explain something?
+  - Does this record a stated preference that directly governs how to answer this question?
+  - Does this describe an ongoing project or goal that the current question relates to?
+  - Is this a prior decision made about the same subject that bears on the current question?
+If none of the above are true, the memory is NOT relevant. Merely sharing a broad domain (e.g., both involve "technology" or "food") is not enough.
+
 Rules:
 1. Judge ONLY the candidate memory IDs listed in the candidate memories section. Never invent, hallucinate, or reference other memory IDs.
 2. Confidence scoring (0-100):
-   - Confidence (0-100) represents how directly this memory bears on the query or provides essential personal context for answering it.
-   - High confidence (70-100): The memory directly answers, explains, or directly bears on the specific query or topic (e.g. a decision explaining a choice, or foundational knowledge directly underlying the problem being solved, such as mathematical functions for calculus).
-   - Medium confidence (50-69): The memory is directly related and useful context for the query.
-   - Low confidence (<50): The memory is merely on the same vague general topic without useful bearing on the query (e.g. condiment/pickle recipes when asked what to cook for a meal).
-   - Unrelated (0): The memory has no connection to the query. You MUST return relevant=false.
-3. Connected topics & learning context:
-   - When the user asks about or is stuck on a subject (such as calculus), personal memories of their learning background in foundational/connected subjects (such as mathematical functions) directly bear on tailoring the answer to what they know. Treat this as relevant with confidence >= 50.
-4. Specificity & domain boundaries:
-   - For broad meal planning queries like "what should I cook for dinner", candidate memories must describe actual meal dishes, dinner recipes, or meal/dietary preferences. Single condiments, preservation recipes (e.g., pickle recipes), or standalone ingredients do NOT answer what to cook for dinner; mark them relevant=false with confidence < 50.
-   - Do NOT mark general conversational or format preferences (e.g., 'User prefers short answers') as relevant for general knowledge, coding (e.g., CSS), or unrelated queries; mark them relevant=false with confidence 0 unless the query specifically asks about formatting or communication style.
-   - Unrelated records (e.g., database choices like Postgres, calculus memories for CSS queries, or pickle recipes for calculus/CSS) MUST be marked relevant=false with confidence 0.
+   - High confidence (70-100): The memory directly answers, explains, or provides essential personal context for the specific query — such as a recorded decision explaining a prior choice, or foundational background knowledge that directly underlies the problem the user is solving.
+   - Medium confidence (50-69): The memory is directly related and provides useful context for answering the query.
+   - Low confidence (<50): The memory is on the same general domain but does not usefully bear on this specific query. Mark relevant=false.
+   - Unrelated (0): The memory has no meaningful connection to the query. You MUST return relevant=false.
+3. Prerequisite and learning context:
+   - Personal memories about the user's background knowledge or skill level in a subject directly bear on tailoring the answer to what they already know. If the query is about a topic and the memory records what the user knows or is learning in a connected subject, treat this as relevant with confidence >= 50.
+4. Specificity and domain boundaries:
+   - A memory about the user's dietary restrictions or food preferences IS relevant to questions about what to eat or cook. A memory about a narrow food item or single recipe unrelated to the user's dietary constraints when asked a broad meal question is NOT.
+   - Format or communication preferences are only relevant if the query is specifically about communication style or formatting. They are NOT relevant for general knowledge, technical, or topic-unrelated questions.
+   - Records about subjects unrelated to the current query domain MUST be marked relevant=false with confidence 0.
 5. Do NOT invent facts or details not present in the memory record.
 
 CRITICAL SECURITY AND DATA INTEGRITY RULES:
@@ -136,7 +142,7 @@ async def retrieve_memory(
     user: User,
     query: str,
     now: Optional[datetime] = None,
-    timeout: float = 15.0,
+    timeout: Optional[float] = None,
     top_k: Optional[int] = None,
     min_similarity: Optional[float] = None,
 ) -> RetrievalResult:
@@ -150,9 +156,10 @@ async def retrieve_memory(
        Keep relevant=True AND confidence >= settings.RELEVANCE_MIN_CONFIDENCE, sorted descending.
     5. Fail closed if chat_json returns None: log and return empty result.
     6. Record per-step timings (embed, search, judge) in result.timings.
-    7. Whole function is wrapped in asyncio.wait_for(timeout=timeout). On timeout, logs warning and returns
-       empty RetrievalResult(timed_out=True).
+    7. Whole function is wrapped in asyncio.wait_for(timeout=timeout). On timeout, logs WARNING with
+       user_id and elapsed time, returns empty RetrievalResult(timed_out=True).
     """
+    effective_timeout = timeout if timeout is not None else settings.RETRIEVAL_TIMEOUT_SECONDS
     async def _do_retrieve() -> RetrievalResult:
         timings: Dict[str, float] = {}
 
@@ -284,11 +291,16 @@ async def retrieve_memory(
             timed_out=False,
         )
 
+    t_start = time.perf_counter()
     try:
-        return await asyncio.wait_for(_do_retrieve(), timeout=timeout)
+        return await asyncio.wait_for(_do_retrieve(), timeout=effective_timeout)
     except asyncio.TimeoutError:
+        elapsed = round(time.perf_counter() - t_start, 2)
         logger.warning(
-            "retrieve_memory timed out after %.2f seconds for query %r", timeout, query
+            "retrieve_memory timed out for user_id=%s after %.2fs (limit=%.2fs)",
+            user.id,
+            elapsed,
+            effective_timeout,
         )
         return RetrievalResult(
             items=[],

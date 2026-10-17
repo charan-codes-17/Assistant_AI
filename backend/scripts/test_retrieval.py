@@ -696,13 +696,208 @@ async def main() -> None:
             })
 
         finally:
-            print("\nCleaning up all throwaway users...")
+            print("\nCleaning up all throwaway users (main session)...")
             for uid in users_to_cleanup:
                 await cleanup_user(session, uid)
             print(f"Cleaned up {len(users_to_cleanup)} test user(s).")
 
+    # Run section 5 in a fresh session context so cleanup of the main session can happen cleanly
+    async with async_session() as session5:
+        user_new: Optional[User] = None
+        try:
+            print("\n[SECTION 5] New retrieval cases with different data (Python / vegetarian)...")
+            user_new = await create_test_user(session5, "newcases")
+            users_to_cleanup.append(user_new.id)
+
+            new_texts = [
+                "User is learning Python",
+                "User is vegetarian",
+            ]
+            new_vecs = await embed_texts(new_texts)
+            rec_python = KnowledgeRecord(
+                user_id=user_new.id,
+                kind="knowledge",
+                content=new_texts[0],
+                certainty="decided",
+                source="text",
+                status="confirmed",
+                created_at=FIXED_NOW.astimezone(timezone.utc),
+                embedding=new_vecs[0],
+            )
+            rec_veg = KnowledgeRecord(
+                user_id=user_new.id,
+                kind="preference",
+                content=new_texts[1],
+                certainty="decided",
+                source="text",
+                status="confirmed",
+                created_at=FIXED_NOW.astimezone(timezone.utc),
+                embedding=new_vecs[1],
+            )
+            session5.add_all([rec_python, rec_veg])
+            await session5.commit()
+            await session5.refresh(rec_python)
+            await session5.refresh(rec_veg)
+
+            # Case-N-a: "can you help me with recursion" -> "User is learning Python" relevant
+            print("Running Case-N-a: Python learner + recursion query -> relevant...")
+            res_na = await retrieve_memory(
+                session=session5,
+                user=user_new,
+                query="can you help me with recursion",
+                now=FIXED_NOW,
+                top_k=10,
+                min_similarity=0.0,
+            )
+            python_in_na = next(
+                (it for it in res_na.items if "python" in it.content.lower()), None
+            )
+            # Print per-record detail
+            print(f"   [Case-N-a] query='can you help me with recursion'")
+            for it in res_na.items:
+                print(f"     -> record={it.content!r}, similarity={it.similarity:.4f}, confidence={it.confidence}, verdict=RELEVANT")
+            if not res_na.items:
+                # Show what candidates were considered (similarity below threshold won't show)
+                print(f"     -> 0 items returned (candidates considered: {res_na.candidates_considered})")
+            cna_pass = python_in_na is not None and python_in_na.confidence >= 50
+            results.append({
+                "id": "Case-N-a",
+                "name": "Python learner + recursion query -> relevant",
+                "expected": "Python record returned, confidence>=50",
+                "actual": f"python_found={python_in_na is not None}, conf={python_in_na.confidence if python_in_na else 0}",
+                "status": "PASS" if cna_pass else "FAIL",
+                "detail": f"items={len(res_na.items)}, python_conf={python_in_na.confidence if python_in_na else 'n/a'}",
+            })
+
+            # Case-N-b: "what should I cook tonight" -> "User is vegetarian" relevant
+            print("Running Case-N-b: Vegetarian + cooking query -> relevant...")
+            res_nb = await retrieve_memory(
+                session=session5,
+                user=user_new,
+                query="what should I cook tonight",
+                now=FIXED_NOW,
+                top_k=10,
+                min_similarity=0.0,
+            )
+            veg_in_nb = next(
+                (it for it in res_nb.items if "vegetarian" in it.content.lower()), None
+            )
+            print(f"   [Case-N-b] query='what should I cook tonight'")
+            for it in res_nb.items:
+                print(f"     -> record={it.content!r}, similarity={it.similarity:.4f}, confidence={it.confidence}, verdict=RELEVANT")
+            if not res_nb.items:
+                print(f"     -> 0 items returned (candidates considered: {res_nb.candidates_considered})")
+            cnb_pass = veg_in_nb is not None and veg_in_nb.confidence >= 50
+            results.append({
+                "id": "Case-N-b",
+                "name": "Vegetarian + cooking query -> relevant",
+                "expected": "Vegetarian record returned, confidence>=50",
+                "actual": f"veg_found={veg_in_nb is not None}, conf={veg_in_nb.confidence if veg_in_nb else 0}",
+                "status": "PASS" if cnb_pass else "FAIL",
+                "detail": f"items={len(res_nb.items)}, veg_conf={veg_in_nb.confidence if veg_in_nb else 'n/a'}",
+            })
+
+            # Case-N-c: "how do I center a div" -> "User is vegetarian" NOT returned
+            print("Running Case-N-c: Vegetarian + CSS query -> NOT returned...")
+            res_nc = await retrieve_memory(
+                session=session5,
+                user=user_new,
+                query="how do I center a div",
+                now=FIXED_NOW,
+                top_k=10,
+                min_similarity=0.0,
+            )
+            veg_in_nc = next(
+                (it for it in res_nc.items if "vegetarian" in it.content.lower()), None
+            )
+            print(f"   [Case-N-c] query='how do I center a div'")
+            for it in res_nc.items:
+                print(f"     -> record={it.content!r}, similarity={it.similarity:.4f}, confidence={it.confidence}, verdict=RELEVANT (should be empty)")
+            if not res_nc.items:
+                print(f"     -> 0 items returned (correct) (candidates considered: {res_nc.candidates_considered})")
+            cnc_pass = veg_in_nc is None
+            results.append({
+                "id": "Case-N-c",
+                "name": "Vegetarian + CSS query -> NOT returned",
+                "expected": "No vegetarian record returned for CSS query",
+                "actual": f"veg_in_result={veg_in_nc is not None}",
+                "status": "PASS" if cnc_pass else "FAIL",
+                "detail": f"items={len(res_nc.items)}",
+            })
+
+            # Case-N-d: "best way to cook rice" -> "User is learning Python" NOT returned
+            print("Running Case-N-d: Python learner + rice query -> NOT returned...")
+            res_nd = await retrieve_memory(
+                session=session5,
+                user=user_new,
+                query="best way to cook rice",
+                now=FIXED_NOW,
+                top_k=10,
+                min_similarity=0.0,
+            )
+            python_in_nd = next(
+                (it for it in res_nd.items if "python" in it.content.lower()), None
+            )
+            print(f"   [Case-N-d] query='best way to cook rice'")
+            for it in res_nd.items:
+                print(f"     -> record={it.content!r}, similarity={it.similarity:.4f}, confidence={it.confidence}, verdict=RELEVANT (should be empty)")
+            if not res_nd.items:
+                print(f"     -> 0 items returned (correct) (candidates considered: {res_nd.candidates_considered})")
+            cnd_pass = python_in_nd is None
+            results.append({
+                "id": "Case-N-d",
+                "name": "Python learner + rice query -> NOT returned",
+                "expected": "No Python record returned for rice query",
+                "actual": f"python_in_result={python_in_nd is not None}",
+                "status": "PASS" if cnd_pass else "FAIL",
+                "detail": f"items={len(res_nd.items)}",
+            })
+
+        finally:
+            print("\nCleaning up section 5 test user...")
+            if user_new:
+                await cleanup_user(session5, user_new.id)
+
     # =========================================================================
-    # Print PASS/FAIL table
+    # SECTION 6: Settings-based timeout unit test (Item 2)
+    # =========================================================================
+    print("\n[SECTION 6] Settings-based timeout unit test...")
+    async with async_session() as session6:
+        user_t6: Optional[User] = None
+        try:
+            user_t6 = await create_test_user(session6, "timeout6")
+            await seed_canonical_records(session6, user_t6, FIXED_NOW)
+
+            # Mock a slow judge (sleeps 2 seconds) with a tiny timeout override
+            async def fake_slow_judge(*args: Any, **kwargs: Any) -> Optional[JudgmentResult]:
+                await asyncio.sleep(2.0)
+                return JudgmentResult(judgments=[])
+
+            with unittest.mock.patch.object(retrieval_module, "chat_json", side_effect=fake_slow_judge):
+                res_t6 = await retrieve_memory(
+                    session=session6,
+                    user=user_t6,
+                    query="I'm stuck on a calculus problem",
+                    now=FIXED_NOW,
+                    timeout=0.1,  # 100ms — forces timeout during judge step
+                )
+
+            ct6_pass = res_t6.timed_out is True and len(res_t6.items) == 0
+            results.append({
+                "id": "Case-T6",
+                "name": "Unit: settings-based timeout (slow judge)",
+                "expected": "timed_out=True, items=0, no exception",
+                "actual": f"timed_out={res_t6.timed_out}, items={len(res_t6.items)}",
+                "status": "PASS" if ct6_pass else "FAIL",
+                "detail": f"timed_out={res_t6.timed_out}, items={len(res_t6.items)}",
+            })
+            print(f"   Result: timed_out={res_t6.timed_out}, items={len(res_t6.items)} -> {'PASS' if ct6_pass else 'FAIL'}")
+        finally:
+            if user_t6:
+                await cleanup_user(session6, user_t6.id)
+
+
+    # =========================================================================
     # =========================================================================
     print("\n" + "=" * 105)
     print(f"{'CASE ID':<9} | {'TEST NAME':<35} | {'EXPECTED':<30} | {'STATUS':<6} | {'DETAILS'}")

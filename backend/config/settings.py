@@ -58,11 +58,19 @@ class Settings(BaseSettings):
         default=50,
         description="Minimum confidence score (0-100) for relevance judgment",
     )
+    RETRIEVAL_TIMEOUT_SECONDS: float = Field(
+        default=15.0,
+        description="Wall-clock timeout in seconds for the full retrieve_memory call",
+    )
 
     # Intervention & Scheduler Reminders
     REMINDER_LEAD_MINUTES: int = Field(
         default=60,
         description="Lead time in minutes before task due_at to fire deadline reminders",
+    )
+    INTERVENTION_TIMEOUT_SECONDS: float = Field(
+        default=30.0,
+        description="Wall-clock timeout in seconds for the conversation-path intervention LLM call",
     )
 
     # Auth (needed from Phase 7; no insecure default)

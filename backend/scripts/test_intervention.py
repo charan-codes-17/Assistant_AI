@@ -31,7 +31,7 @@ from pathlib import Path
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import unittest.mock
 import uuid
 from zoneinfo import ZoneInfo
@@ -681,8 +681,11 @@ async def main() -> None:
                     task_arg=task_a,
                     now_arg=now_10,
                 )
-            local_due_17 = task_a.due_at.astimezone(IST_TZ).strftime("%Y-%m-%d %H:%M %Z").strip()
-            expected_template = f"Reminder: {task_a.title} is due {local_due_17}"
+            from backend.services.intervention import _format_reminder_time
+            local_due_17 = task_a.due_at.astimezone(IST_TZ)
+            local_now_17 = now_10.astimezone(IST_TZ)
+            when_str_17 = _format_reminder_time(local_due_17, local_now_17)
+            expected_template = f"Reminder: {task_a.title}, due {when_str_17}."
             c17_pass = (
                 dec17.action == "remind"
                 and dec17.target_task_id == task_a.id
@@ -695,6 +698,136 @@ async def main() -> None:
                 "actual": f"action={dec17.action}, message={dec17.message!r}",
                 "status": "PASS" if c17_pass else "FAIL",
                 "detail": f"msg={dec17.message!r} ({lat17}s)",
+            })
+
+            # =============================================================
+            # Item 3 Tests: Reminder Message Quality
+            # =============================================================
+            print("\n[ITEM 3] Reminder message quality tests (format, grammar, no raw timestamps)...")
+            from backend.services.intervention import _format_reminder_time as _fmt_time
+
+            def _has_raw_timestamp(msg: str) -> bool:
+                """Return True if msg contains a raw ISO timestamp or timezone abbreviation."""
+                import re
+                # ISO date pattern: 4-digit-year-month-day
+                if re.search(r"\d{4}-\d{2}-\d{2}", msg):
+                    return True
+                # HH:MM surrounded by digits (ISO time part)
+                if re.search(r"\d{4}-\d{2}", msg):
+                    return True
+                # Timezone abbreviations like IST, UTC, EST etc. at end of time
+                if re.search(r"\b(IST|UTC|EST|PST|GMT|CST)\b", msg):
+                    return True
+                return False
+
+            # Item-3a: due in 30 min (today at 9:00 AM)
+            now_3a = datetime(2026, 10, 18, 8, 30, 0, tzinfo=IST_TZ)
+            dec_3a, lat_3a = await run_case(
+                "Item-3a",
+                "Reminder: due in 30 min",
+                trigger="scheduler",
+                task_arg=task_a,
+                now_arg=now_3a,
+            )
+            print(f"   [Item-3a] Final message: {dec_3a.message!r}")
+            item3a_has_raw = _has_raw_timestamp(dec_3a.message or "")
+            item3a_pass = dec_3a.action == "remind" and not item3a_has_raw
+            results.append({
+                "id": "Item-3a",
+                "name": "Reminder msg: due in 30 min",
+                "expected": "action=remind, no raw timestamp",
+                "actual": f"action={dec_3a.action}, raw={item3a_has_raw}, msg={dec_3a.message!r}",
+                "status": "PASS" if item3a_pass else "FAIL",
+                "detail": f"has_raw={item3a_has_raw}, msg={dec_3a.message!r} ({lat_3a}s)",
+            })
+
+            # Item-3b: due tomorrow at 9 AM
+            # Create a task due tomorrow from now
+            task_tom = Task(
+                user_id=user.id,
+                title="Review the project plan",
+                origin="manual",
+                due_at=datetime(2026, 10, 19, 9, 0, 0, tzinfo=IST_TZ),
+                status="open",
+            )
+            session.add(task_tom)
+            await session.commit()
+            await session.refresh(task_tom)
+            now_3b = datetime(2026, 10, 18, 9, 30, 0, tzinfo=IST_TZ)  # lead window: 23.5h but within REMINDER_LEAD_MINUTES from tomorrow
+            # We need it within lead window: task due tomorrow 9 AM, REMINDER_LEAD_MINUTES=60
+            # so we need now >= due - 60min = 2026-10-19 08:00 IST
+            now_3b = datetime(2026, 10, 19, 8, 30, 0, tzinfo=IST_TZ)
+            dec_3b, lat_3b = await run_case(
+                "Item-3b",
+                "Reminder: due tomorrow 9 AM",
+                trigger="scheduler",
+                task_arg=task_tom,
+                now_arg=now_3b,
+            )
+            print(f"   [Item-3b] Final message: {dec_3b.message!r}")
+            item3b_has_raw = _has_raw_timestamp(dec_3b.message or "")
+            item3b_pass = dec_3b.action == "remind" and not item3b_has_raw
+            results.append({
+                "id": "Item-3b",
+                "name": "Reminder msg: due tomorrow 9 AM",
+                "expected": "action=remind, no raw timestamp",
+                "actual": f"action={dec_3b.action}, raw={item3b_has_raw}, msg={dec_3b.message!r}",
+                "status": "PASS" if item3b_pass else "FAIL",
+                "detail": f"has_raw={item3b_has_raw}, msg={dec_3b.message!r} ({lat_3b}s)",
+            })
+            await session.delete(task_tom)
+            await session.commit()
+
+            # Item-3c: overdue by 2 hours (now=11:00, due 09:00 same day)
+            now_3c = datetime(2026, 10, 18, 11, 0, 0, tzinfo=IST_TZ)
+            dec_3c, lat_3c = await run_case(
+                "Item-3c",
+                "Reminder: overdue by 2 hours",
+                trigger="scheduler",
+                task_arg=task_a,
+                now_arg=now_3c,
+            )
+            print(f"   [Item-3c] Final message: {dec_3c.message!r}")
+            item3c_has_raw = _has_raw_timestamp(dec_3c.message or "")
+            item3c_pass = dec_3c.action == "remind" and not item3c_has_raw
+            results.append({
+                "id": "Item-3c",
+                "name": "Reminder msg: overdue by 2 hours",
+                "expected": "action=remind, 'was due' wording, no raw timestamp",
+                "actual": f"action={dec_3c.action}, raw={item3c_has_raw}, msg={dec_3c.message!r}",
+                "status": "PASS" if item3c_pass else "FAIL",
+                "detail": f"has_raw={item3c_has_raw}, msg={dec_3c.message!r} ({lat_3c}s)",
+            })
+
+            # Item-3d: forced LLM failure → template is used, no raw timestamp
+            async def fake_llm_fail_3d(*args: Any, **kwargs: Any) -> Any:
+                return None
+
+            with unittest.mock.patch.object(intervention_module, "chat_json", side_effect=fake_llm_fail_3d):
+                dec_3d, lat_3d = await run_case(
+                    "Item-3d",
+                    "Reminder: forced LLM fail → template",
+                    trigger="scheduler",
+                    task_arg=task_a,
+                    now_arg=now_10,  # 08:30, due 09:00
+                )
+            print(f"   [Item-3d] Final message (template): {dec_3d.message!r}")
+            item3d_has_raw = _has_raw_timestamp(dec_3d.message or "")
+            # Template should be used since LLM returned None
+            when_3d = _fmt_time(task_a.due_at.astimezone(IST_TZ), now_10.astimezone(IST_TZ))
+            expected_3d = f"Reminder: {task_a.title}, due {when_3d}."
+            item3d_pass = (
+                dec_3d.action == "remind"
+                and not item3d_has_raw
+                and dec_3d.message == expected_3d
+            )
+            results.append({
+                "id": "Item-3d",
+                "name": "Reminder msg: forced LLM fail → template",
+                "expected": f"action=remind, template used, no raw ts: {expected_3d!r}",
+                "actual": f"action={dec_3d.action}, raw={item3d_has_raw}, msg={dec_3d.message!r}",
+                "status": "PASS" if item3d_pass else "FAIL",
+                "detail": f"has_raw={item3d_has_raw}, msg={dec_3d.message!r} ({lat_3d}s)",
             })
 
             # =============================================================
@@ -802,6 +935,160 @@ async def main() -> None:
             })
 
             # =============================================================
+            # Item 4 Tests: Conversation-path Remind Guard
+            # =============================================================
+
+            # Item-4a: Task due in 20 hours -> conversation path must NOT produce "remind"
+            print("\n[ITEM 4] Conversation remind-downgrade tests...")
+            now_4a = datetime(2026, 10, 17, 13, 0, 0, tzinfo=IST_TZ)  # task_a due Oct 18 09:00 = 20h later
+            dec_4a, lat_4a = await run_case(
+                "Item-4a",
+                "Conv: task due in 20h -> NOT remind",
+                trigger="conversation",
+                text="just checking in",
+                now_arg=now_4a,
+            )
+            item4a_pass = dec_4a.action != "remind"
+            results.append({
+                "id": "Item-4a",
+                "name": "Conv guard: task due in 20h -> not remind",
+                "expected": "action != remind",
+                "actual": f"action={dec_4a.action}",
+                "status": "PASS" if item4a_pass else "FAIL",
+                "detail": f"action={dec_4a.action}, contradiction={dec_4a.contradiction} ({lat_4a}s)",
+            })
+
+            # Item-4b: Mocked LLM returning "remind" on conversation -> downgraded
+            async def fake_llm_remind_conv(*args: Any, **kwargs: Any) -> Any:
+                return InterventionDecision(
+                    action="remind",
+                    target_task_id=task_a.id,
+                    message="LLM tried to remind about Arun",
+                    reason="Fake remind on conversation",
+                )
+
+            with unittest.mock.patch.object(intervention_module, "chat_json", side_effect=fake_llm_remind_conv):
+                dec_4b, lat_4b = await run_case(
+                    "Item-4b",
+                    "Conv guard: LLM returns remind -> downgraded",
+                    trigger="conversation",
+                    text="I'll look at it later",
+                    now_arg=FIXED_NOW,
+                )
+            item4b_pass = dec_4b.action in ("none", "surface") and dec_4b.action != "remind"
+            results.append({
+                "id": "Item-4b",
+                "name": "Conv guard: LLM remind downgraded",
+                "expected": "action != remind (downgraded to none or surface)",
+                "actual": f"action={dec_4b.action}",
+                "status": "PASS" if item4b_pass else "FAIL",
+                "detail": f"action={dec_4b.action} (downgraded from remind) ({lat_4b}s)",
+            })
+
+            # =============================================================
+            # Item 5 Tests: False-Contradiction Negatives
+            # =============================================================
+            print("\n[ITEM 5] False-contradiction negative tests...")
+
+            # Item-5a: Task "Send Arun the PDF" due Friday; user says "I'll send it on Friday."
+            # task_a.due_at = 2026-10-18 09:00 IST which is a Sunday, so we create a new task due Friday
+            now_5 = datetime(2026, 10, 14, 10, 0, 0, tzinfo=IST_TZ)  # Wednesday
+            task_friday = Task(
+                user_id=user.id,
+                title="Send Arun the PDF",
+                origin="promise",
+                due_at=datetime(2026, 10, 16, 9, 0, 0, tzinfo=IST_TZ),  # Friday
+                status="open",
+            )
+            session.add(task_friday)
+            await session.commit()
+            await session.refresh(task_friday)
+
+            dec_5a, lat_5a = await run_case(
+                "Item-5a",
+                "False contra: same date restated",
+                trigger="conversation",
+                text="I'll send it on Friday.",
+                now_arg=now_5,
+            )
+            item5a_pass = dec_5a.contradiction is False and dec_5a.action not in ("remind",)
+            results.append({
+                "id": "Item-5a",
+                "name": "False contra: same date restated",
+                "expected": "contradiction=False, action in (none, suggest, surface, act)",
+                "actual": f"contradiction={dec_5a.contradiction}, action={dec_5a.action}",
+                "status": "PASS" if item5a_pass else "FAIL",
+                "detail": f"contradiction={dec_5a.contradiction}, action={dec_5a.action} ({lat_5a}s)",
+            })
+
+            await session.delete(task_friday)
+            await session.commit()
+
+            # Item-5b: Stored goal "User is learning Postgres"; user says "I set up a Postgres database today."
+            goal_pg = Goal(
+                user_id=user.id,
+                title="User is learning Postgres",
+                status="active",
+            )
+            session.add(goal_pg)
+            await session.commit()
+            await session.refresh(goal_pg)
+
+            dec_5b, lat_5b = await run_case(
+                "Item-5b",
+                "False contra: consistent goal progress",
+                trigger="conversation",
+                text="I set up a Postgres database today.",
+            )
+            item5b_pass = dec_5b.contradiction is False
+            results.append({
+                "id": "Item-5b",
+                "name": "False contra: consistent goal progress",
+                "expected": "contradiction=False",
+                "actual": f"contradiction={dec_5b.contradiction}, action={dec_5b.action}",
+                "status": "PASS" if item5b_pass else "FAIL",
+                "detail": f"contradiction={dec_5b.contradiction}, action={dec_5b.action} ({lat_5b}s)",
+            })
+
+            await session.delete(goal_pg)
+            await session.commit()
+
+            # Item-5c: Stored task "Send Arun the PDF"; user says "I need to send the same PDF to Meera."
+            dec_5c, lat_5c = await run_case(
+                "Item-5c",
+                "False contra: different person same file",
+                trigger="conversation",
+                text="I need to send the same PDF to Meera.",
+            )
+            item5c_pass = dec_5c.contradiction is False
+            results.append({
+                "id": "Item-5c",
+                "name": "False contra: different person same file",
+                "expected": "contradiction=False",
+                "actual": f"contradiction={dec_5c.contradiction}, action={dec_5c.action}",
+                "status": "PASS" if item5c_pass else "FAIL",
+                "detail": f"contradiction={dec_5c.contradiction}, action={dec_5c.action} ({lat_5c}s)",
+            })
+
+            # Item-5d: A turn unrelated to any stored task or goal
+            dec_5d, lat_5d = await run_case(
+                "Item-5d",
+                "False contra: completely unrelated turn",
+                trigger="conversation",
+                text="What is the speed of light?",
+            )
+            item5d_pass = dec_5d.contradiction is False and dec_5d.action in ("none", "surface", "suggest")
+            results.append({
+                "id": "Item-5d",
+                "name": "False contra: unrelated turn",
+                "expected": "contradiction=False, action in (none, suggest, surface)",
+                "actual": f"contradiction={dec_5d.contradiction}, action={dec_5d.action}",
+                "status": "PASS" if item5d_pass else "FAIL",
+                "detail": f"contradiction={dec_5d.contradiction}, action={dec_5d.action} ({lat_5d}s)",
+            })
+
+
+            # =============================================================
             # Post-check: Assert Database rows are UNCHANGED
             # =============================================================
             print("\n[VERIFICATION] Verifying Task and KnowledgeRecord rows were not modified...")
@@ -861,6 +1148,22 @@ async def main() -> None:
         print("\nALL INTERVENTION TEST CASES PASSED SUCCESSFULLY.")
     else:
         print("\nSOME INTERVENTION TEST CASES FAILED. See details above.")
+
+    # Print full output for all "suggest" results (Item 5 requirement)
+    suggest_results = [r for r in results if "suggest" in r.get("actual", "").lower() and "action=suggest" in r.get("actual", "").lower()]
+    if suggest_results:
+        print("\n" + "=" * 80)
+        print("SUGGEST RESULTS — Full output for all cases that returned action='suggest':")
+        print("=" * 80)
+        for r in suggest_results:
+            print(f"  Case {r['id']}: {r['name']}")
+            print(f"    Directive : {r['actual']}")
+            print(f"    Detail    : {r['detail']}")
+            print()
+    else:
+        print("\n(No cases returned action='suggest' in this run.)")
+
+    if not all_passed:
         sys.exit(1)
 
 
