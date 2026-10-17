@@ -437,16 +437,15 @@ async def main() -> None:
             })
 
             # -------------------------------------------------------------
-            # Case 5b: Precision check on unrelated queries (all 6 forced to judge)
+            # Case 5b: Precision check on unrelated queries (default pipeline)
             # -------------------------------------------------------------
-            print("Running Case 5b: Precision check with 'dinner' and 'CSS' queries (min_similarity=0.0)...")
+            print("Running Case 5b: Precision check with 'dinner' and 'CSS' queries...")
             res5b_dinner = await retrieve_memory(
                 session=session,
                 user=user_inject,
                 query="what should I cook for dinner",
                 now=FIXED_NOW,
                 top_k=10,
-                min_similarity=0.0,
             )
             res5b_css = await retrieve_memory(
                 session=session,
@@ -454,7 +453,6 @@ async def main() -> None:
                 query="how do I center a div in CSS",
                 now=FIXED_NOW,
                 top_k=10,
-                min_similarity=0.0,
             )
 
             c5b_pass = (len(res5b_dinner.items) == 0) and (len(res5b_css.items) == 0)
@@ -747,18 +745,15 @@ async def main() -> None:
                 query="can you help me with recursion",
                 now=FIXED_NOW,
                 top_k=10,
-                min_similarity=0.0,
             )
             python_in_na = next(
                 (it for it in res_na.items if "python" in it.content.lower()), None
             )
-            # Print per-record detail
-            print(f"   [Case-N-a] query='can you help me with recursion'")
-            for it in res_na.items:
-                print(f"     -> record={it.content!r}, similarity={it.similarity:.4f}, confidence={it.confidence}, verdict=RELEVANT")
-            if not res_na.items:
-                # Show what candidates were considered (similarity below threshold won't show)
-                print(f"     -> 0 items returned (candidates considered: {res_na.candidates_considered})")
+            print(f"   [Case-N-a] query='can you help me with recursion' (candidates evaluated: {len(res_na.candidates)}):")
+            for c in res_na.candidates:
+                print(f"     -> record={c.content!r}, similarity={c.similarity:.4f}, confidence={c.confidence}, relevant={c.relevant}")
+            if not res_na.candidates:
+                print(f"     -> 0 candidates reached judge (candidates_considered: {res_na.candidates_considered}, cutoff={settings.RETRIEVAL_MIN_SIMILARITY})")
             cna_pass = python_in_na is not None and python_in_na.confidence >= 50
             results.append({
                 "id": "Case-N-a",
@@ -777,16 +772,15 @@ async def main() -> None:
                 query="what should I cook tonight",
                 now=FIXED_NOW,
                 top_k=10,
-                min_similarity=0.0,
             )
             veg_in_nb = next(
                 (it for it in res_nb.items if "vegetarian" in it.content.lower()), None
             )
-            print(f"   [Case-N-b] query='what should I cook tonight'")
-            for it in res_nb.items:
-                print(f"     -> record={it.content!r}, similarity={it.similarity:.4f}, confidence={it.confidence}, verdict=RELEVANT")
-            if not res_nb.items:
-                print(f"     -> 0 items returned (candidates considered: {res_nb.candidates_considered})")
+            print(f"   [Case-N-b] query='what should I cook tonight' (candidates evaluated: {len(res_nb.candidates)}):")
+            for c in res_nb.candidates:
+                print(f"     -> record={c.content!r}, similarity={c.similarity:.4f}, confidence={c.confidence}, relevant={c.relevant}")
+            if not res_nb.candidates:
+                print(f"     -> 0 candidates reached judge (candidates_considered: {res_nb.candidates_considered}, cutoff={settings.RETRIEVAL_MIN_SIMILARITY})")
             cnb_pass = veg_in_nb is not None and veg_in_nb.confidence >= 50
             results.append({
                 "id": "Case-N-b",
@@ -805,16 +799,15 @@ async def main() -> None:
                 query="how do I center a div",
                 now=FIXED_NOW,
                 top_k=10,
-                min_similarity=0.0,
             )
             veg_in_nc = next(
                 (it for it in res_nc.items if "vegetarian" in it.content.lower()), None
             )
-            print(f"   [Case-N-c] query='how do I center a div'")
-            for it in res_nc.items:
-                print(f"     -> record={it.content!r}, similarity={it.similarity:.4f}, confidence={it.confidence}, verdict=RELEVANT (should be empty)")
-            if not res_nc.items:
-                print(f"     -> 0 items returned (correct) (candidates considered: {res_nc.candidates_considered})")
+            print(f"   [Case-N-c] query='how do I center a div' (candidates evaluated: {len(res_nc.candidates)}):")
+            for c in res_nc.candidates:
+                print(f"     -> record={c.content!r}, similarity={c.similarity:.4f}, confidence={c.confidence}, relevant={c.relevant}")
+            if not res_nc.candidates:
+                print(f"     -> 0 candidates reached judge (candidates_considered: {res_nc.candidates_considered}, cutoff={settings.RETRIEVAL_MIN_SIMILARITY})")
             cnc_pass = veg_in_nc is None
             results.append({
                 "id": "Case-N-c",
@@ -833,16 +826,15 @@ async def main() -> None:
                 query="best way to cook rice",
                 now=FIXED_NOW,
                 top_k=10,
-                min_similarity=0.0,
             )
             python_in_nd = next(
                 (it for it in res_nd.items if "python" in it.content.lower()), None
             )
-            print(f"   [Case-N-d] query='best way to cook rice'")
-            for it in res_nd.items:
-                print(f"     -> record={it.content!r}, similarity={it.similarity:.4f}, confidence={it.confidence}, verdict=RELEVANT (should be empty)")
-            if not res_nd.items:
-                print(f"     -> 0 items returned (correct) (candidates considered: {res_nd.candidates_considered})")
+            print(f"   [Case-N-d] query='best way to cook rice' (candidates evaluated: {len(res_nd.candidates)}):")
+            for c in res_nd.candidates:
+                print(f"     -> record={c.content!r}, similarity={c.similarity:.4f}, confidence={c.confidence}, relevant={c.relevant}")
+            if not res_nd.candidates:
+                print(f"     -> 0 candidates reached judge (candidates_considered: {res_nd.candidates_considered}, cutoff={settings.RETRIEVAL_MIN_SIMILARITY})")
             cnd_pass = python_in_nd is None
             results.append({
                 "id": "Case-N-d",
@@ -851,6 +843,27 @@ async def main() -> None:
                 "actual": f"python_in_result={python_in_nd is not None}",
                 "status": "PASS" if cnd_pass else "FAIL",
                 "detail": f"items={len(res_nd.items)}",
+            })
+
+            # Assertion across all retrieval tests: every item that reached the judge had similarity >= RETRIEVAL_MIN_SIMILARITY
+            all_retrieval_candidates = (
+                res1.candidates + res2.candidates + res3.candidates + res4.candidates +
+                res5b_dinner.candidates + res5b_css.candidates +
+                (res_tool.candidates if 'res_tool' in locals() else []) +
+                res_na.candidates + res_nb.candidates + res_nc.candidates + res_nd.candidates
+            )
+            below_cutoff_candidates = [
+                c for c in all_retrieval_candidates
+                if c.similarity < settings.RETRIEVAL_MIN_SIMILARITY
+            ]
+            sim_cutoff_pass = len(below_cutoff_candidates) == 0
+            results.append({
+                "id": "Case-Cutoff",
+                "name": "Judge candidate similarity >= RETRIEVAL_MIN_SIMILARITY",
+                "expected": f"0 below-cutoff candidates (threshold={settings.RETRIEVAL_MIN_SIMILARITY})",
+                "actual": f"{len(below_cutoff_candidates)} below-cutoff items reached judge",
+                "status": "PASS" if sim_cutoff_pass else "FAIL",
+                "detail": f"evaluated={len(all_retrieval_candidates)}, below_cutoff={len(below_cutoff_candidates)}",
             })
 
         finally:

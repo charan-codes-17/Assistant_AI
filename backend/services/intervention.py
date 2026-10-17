@@ -56,11 +56,8 @@ class InterventionDecision(BaseModel):
     reason: str = ""
 
 
-class ReminderPhrasing(BaseModel):
-    """Reasoning-tier phrasing for deadline reminder."""
-    message: str = Field(
-        description="A concise reminder message (max 2 plain sentences, no emoji, no exclamation marks) mentioning the task title and local due time"
-    )
+# Minimum confidence required to surface a retrieved record or downgrade conversation remind to surface
+SURFACE_MIN_CONFIDENCE = 70
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +171,7 @@ Rules and Design Safeguards:
    - Set surfaced_record_id to that memory record's ID.
 5. suggest action:
    - At most one concrete next step, only when strongly implied by the situation.
+   - Never offer to create reminders or tasks; promise and task capture is handled elsewhere.
 6. act action:
    - ONLY for "mark_done", "snooze", or "reschedule", and ONLY for a listed task the user's message clearly and explicitly refers to (e.g., "I finished the lab report").
    - Set requires_confirmation=true.
@@ -251,27 +249,6 @@ def _format_reminder_time(local_due: datetime, local_now: datetime) -> str:
         return f"{local_due.strftime('%b')} {local_due.day} at {time_part}"
 
 
-# STOP_WORDS: articles and prepositions that are not "significant" in the title
-_TITLE_STOP_WORDS = frozenset({"the", "a", "an", "of", "to", "for", "in", "on", "at", "by", "and", "or"})
-
-
-def _title_in_message(title: str, message: str) -> bool:
-    """Return True if all significant words of the task title appear in the message (case-insensitive).
-
-    Significant words are those not in _TITLE_STOP_WORDS and at least 2 characters long.
-    Falls back to checking the full title as a substring.
-    """
-    title_lower = title.lower()
-    message_lower = message.lower()
-    # Fast path: exact substring
-    if title_lower in message_lower:
-        return True
-    # Check significant words individually
-    words = re.findall(r"[a-z0-9']+", title_lower)
-    significant = [w for w in words if w not in _TITLE_STOP_WORDS and len(w) >= 2]
-    if not significant:
-        return title_lower in message_lower
-    return all(word in message_lower for word in significant)
 
 
 def _strip_sentences(text: Optional[str], max_sentences: int = 2) -> Optional[str]:
@@ -401,60 +378,19 @@ async def decide_intervention(
         when_str = _format_reminder_time(local_due, local_now)
 
         # Grammatical templates — work correctly for any title
+        # Deterministic message construction in code only:
+        # future:  "Reminder: {title}, due {when}."
+        # overdue: "Reminder: {title} was due {when}."
         if is_overdue:
-            templated_message = f"Reminder: {task.title} was due {when_str}."
+            message = f"Reminder: {task.title} was due {when_str}."
         else:
-            templated_message = f"Reminder: {task.title}, due {when_str}."
+            message = f"Reminder: {task.title}, due {when_str}."
 
-        phrasing_system = (
-            "You are the reminder phrasing engine for a personal AI assistant.\n"
-            "Your ONLY job is to phrase a concise reminder message for the user.\n"
-            "Rules:\n"
-            "1. At most TWO plain sentences.\n"
-            "2. Strictly NO emojis, NO praise, NO simulated emotion, and NO exclamation marks.\n"
-            f"3. MUST mention the task title '{task.title}' (exact wording) and the preformatted time '{when_str}'.\n"
-            "4. Use the preformatted time string exactly as given. Do NOT reformat, convert, or alter dates or times.\n"
-            "5. Do NOT include any timezone abbreviation or raw date/time string other than the one provided.\n"
-            "Respond with strict JSON matching:\n"
-            '{\n  "message": "<plain text message>"\n}'
-        )
-        phrasing_user = (
-            f"Phrase a reminder message for: task '{task.title}', "
-            f"{'which was due' if is_overdue else 'due'} {when_str}."
-        )
-
-        phrased_msg: Optional[str] = None
-        phrased_reason: Optional[str] = None
-        try:
-            resp = await asyncio.wait_for(
-                chat_json(
-                    tier="reasoning",
-                    messages=[
-                        {"role": "system", "content": phrasing_system},
-                        {"role": "user", "content": phrasing_user},
-                    ],
-                    schema=ReminderPhrasing,
-                ),
-                timeout=5.0,
-            )
-            if resp is not None:
-                raw_m = getattr(resp, "message", None) or (resp.get("message") if isinstance(resp, dict) else None)
-                if raw_m and isinstance(raw_m, str) and raw_m.strip():
-                    candidate_msg = _strip_sentences(raw_m, max_sentences=2)
-                    if candidate_msg and _title_in_message(task.title, candidate_msg):
-                        phrased_msg = candidate_msg
-                phrased_reason = getattr(resp, "reason", None) or (resp.get("reason") if isinstance(resp, dict) else None)
-        except Exception as exc:
-            logger.warning("Scheduler reminder phrasing call failed or timed out: %s. Using templated message.", exc)
-            phrased_msg = None
-
-        final_msg = phrased_msg if (phrased_msg and phrased_msg.strip()) else templated_message
-        final_msg = _strip_sentences(final_msg, max_sentences=2) or templated_message
         return InterventionDecision(
             action="remind",
-            message=final_msg,
+            message=message,
             target_task_id=task.id,
-            reason=phrased_reason or "Scheduler reminder for due task",
+            reason="Scheduler reminder for due task",
         )
 
     # =========================================================================
@@ -537,7 +473,7 @@ async def decide_intervention(
     # Reminders are exclusively decided by the scheduler code guards (REMINDER_LEAD_MINUTES).
     if decision.action == "remind":
         sid = decision.surfaced_record_id
-        if sid is not None and sid in retrieved_map and retrieved_map[sid].confidence >= 70:
+        if sid is not None and sid in retrieved_map and retrieved_map[sid].confidence >= SURFACE_MIN_CONFIDENCE:
             logger.warning(
                 "Conversation turn: LLM returned action='remind'; downgrading to 'surface' "
                 "(valid surfaced_record_id=%s). Reminders are scheduler-only.",
@@ -573,7 +509,7 @@ async def decide_intervention(
     # Validate surface
     if decision.action == "surface":
         sid = decision.surfaced_record_id
-        if sid not in retrieved_map or retrieved_map[sid].confidence < 70:
+        if sid not in retrieved_map or retrieved_map[sid].confidence < SURFACE_MIN_CONFIDENCE:
             logger.warning("Action 'surface' with invalid record ID %s; downgrading to none.", sid)
             decision.action = "none"
             decision.surfaced_record_id = None

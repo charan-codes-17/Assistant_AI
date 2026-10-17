@@ -77,9 +77,20 @@ class RetrievedItem(BaseModel):
     reason: str
 
 
+class CandidateEvaluation(BaseModel):
+    """A candidate memory record evaluated by the relevance judge."""
+    record_id: int
+    content: str
+    similarity: float
+    confidence: int = 0
+    relevant: bool = False
+    reason: str = ""
+
+
 class RetrievalResult(BaseModel):
     """Overall outcome of memory retrieval."""
     items: List[RetrievedItem] = Field(default_factory=list)
+    candidates: List[CandidateEvaluation] = Field(default_factory=list)
     candidates_considered: int = 0
     timings: Dict[str, float] = Field(default_factory=dict)
     timed_out: bool = False
@@ -189,10 +200,14 @@ async def retrieve_memory(
         )
         timings["search"] = round(time.perf_counter() - t_search_start, 4)
 
+        # Defensive guard: guarantee no candidate below min_sim_val reaches the judge
+        candidates = [(rec, sim) for rec, sim in candidates if sim >= min_sim_val]
+
         if not candidates:
             timings["judge"] = 0.0
             return RetrievalResult(
                 items=[],
+                candidates=[],
                 candidates_considered=0,
                 timings=timings,
                 timed_out=False,
@@ -241,6 +256,17 @@ async def retrieve_memory(
             )
             return RetrievalResult(
                 items=[],
+                candidates=[
+                    CandidateEvaluation(
+                        record_id=rec.id,
+                        content=rec.content,
+                        similarity=sim,
+                        confidence=0,
+                        relevant=False,
+                        reason="Judgment failed closed",
+                    )
+                    for rec, sim in candidates
+                ],
                 candidates_considered=len(candidates),
                 timings=timings,
                 timed_out=False,
@@ -249,6 +275,7 @@ async def retrieve_memory(
         # Step 4: Validate judgments
         seen_ids: set[int] = set()
         kept_items: List[RetrievedItem] = []
+        judgment_by_id = {j.id: j for j in judgment_res.judgments}
 
         for j in judgment_res.judgments:
             # Discard any judgment whose id is not in the candidate set
@@ -284,8 +311,24 @@ async def retrieve_memory(
         # Sort kept items by confidence descending
         kept_items.sort(key=lambda item: item.confidence, reverse=True)
 
+        # Build candidate evaluation list for all records that reached the judge
+        candidate_evals: List[CandidateEvaluation] = []
+        for rec, sim in candidates:
+            j_cand = judgment_by_id.get(rec.id)
+            candidate_evals.append(
+                CandidateEvaluation(
+                    record_id=rec.id,
+                    content=rec.content,
+                    similarity=sim,
+                    confidence=max(0, min(100, int(j_cand.confidence))) if j_cand else 0,
+                    relevant=j_cand.relevant if j_cand else False,
+                    reason=j_cand.reason if j_cand else "",
+                )
+            )
+
         return RetrievalResult(
             items=kept_items,
+            candidates=candidate_evals,
             candidates_considered=len(candidates),
             timings=timings,
             timed_out=False,
