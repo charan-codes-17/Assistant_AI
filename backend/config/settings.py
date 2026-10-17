@@ -37,8 +37,12 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Dev or deployed bot token")
 
     # Database
-    DATABASE_URL: str = Field(
-        default="postgresql+asyncpg://postgres:postgres@localhost:5432/ai_assistant",
+    DATABASE_URL: str = Field(description="PostgreSQL async connection string")
+
+    # Deduplication
+    DEDUPE_THRESHOLD: float = Field(
+        default=0.85,
+        description="Cosine similarity threshold for deduplicating knowledge records",
     )
 
     # Auth (needed from Phase 7; no insecure default)

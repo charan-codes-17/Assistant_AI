@@ -15,5 +15,5 @@ python-telegram-bot>=21.0
 faster-whisper>=1.0.1
 psutil>=5.9.0
 apscheduler>=3.10.4
-tzdata>=2024.1
+tzdata==2026.5
 python-dotenv>=1.0.1

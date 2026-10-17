@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from backend.config.settings import settings
 from backend.models import KnowledgeRecord, User
+from backend.services.memory_search import search_confirmed
 
 
 def get_embeddings(texts: List[str]) -> List[List[float]]:
@@ -181,30 +182,17 @@ async def run_spike() -> None:
             await session.commit()
             print("   All 6 records persisted to database.")
 
-            # 3. Execute cosine-distance query using pgvector <=> operator
-            print(f"\n3. Executing pgvector cosine-distance query (<=> operator):")
+            # 3. Execute search_confirmed
+            print(f"\n3. Executing search_confirmed (via backend.services.memory_search):")
             print(f"   Query: {repr(query_text)}")
-            print("   Filter: user_id = :uid AND status = 'confirmed' AND (expires_at IS NULL OR expires_at > now())")
+            print("   Filter: user_id = :uid AND status = 'confirmed' AND (expires_at IS NULL OR expires_at > now()) AND superseded_by IS NULL")
 
-            # KnowledgeRecord.embedding.cosine_distance(query_embedding) maps directly to
-            # `knowledge_records.embedding <=> :query_embedding` in pgvector
-            cosine_dist_expr = KnowledgeRecord.embedding.cosine_distance(query_embedding).label("distance")
-
-            stmt = (
-                select(KnowledgeRecord, cosine_dist_expr)
-                .where(
-                    KnowledgeRecord.user_id == user_id,
-                    KnowledgeRecord.status == "confirmed",
-                    or_(
-                        KnowledgeRecord.expires_at.is_(None),
-                        KnowledgeRecord.expires_at > func.now(),
-                    ),
-                )
-                .order_by(cosine_dist_expr.asc())
+            ranked_matches = await search_confirmed(
+                session=session,
+                user_id=user_id,
+                query_embedding=query_embedding,
+                k=10,
             )
-
-            result = await session.execute(stmt)
-            ranked_matches: List[Tuple[KnowledgeRecord, float]] = result.all()
 
             # 4. Print ranked results with similarity scores
             print(f"\n4. Ranked Query Results ({len(ranked_matches)} matched):")
@@ -213,8 +201,8 @@ async def run_spike() -> None:
             print("-" * 90)
 
             returned_contents: List[str] = []
-            for rank, (rec, dist) in enumerate(ranked_matches, start=1):
-                similarity = 1.0 - dist
+            for rank, (rec, similarity) in enumerate(ranked_matches, start=1):
+                dist = 1.0 - similarity
                 returned_contents.append(rec.content)
                 print(
                     f"{rank:<6} | {similarity:+.4f}     | {dist:.4f}     | {rec.status:<10} | {rec.content}"

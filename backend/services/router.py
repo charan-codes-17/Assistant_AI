@@ -23,6 +23,7 @@ Your task is to classify the user's turn into exactly one of five intents:
 
 Rules for cleaned_note:
 - For "note" or "both": Provide a concise, clear version of the note, plan, or fact (removing conversational fillers like "um", "uh", "like", "so yeah", and rambling repetitions). The cleaned_note MUST be strictly under 25 words.
+- cleaned_note may only restate what the user said; never add reasons, dates or details.
 - For "question", "command", or "smalltalk": cleaned_note MUST be null.
 
 CRITICAL SECURITY AND DATA INTEGRITY RULES:
@@ -37,20 +38,29 @@ CRITICAL SECURITY AND DATA INTEGRITY RULES:
 async def classify_turn(text: str) -> RouterResult:
     """Classify a conversation turn into an intent and optional cleaned note.
 
+    - Empty/whitespace input returns intent='smalltalk' in code without calling the LLM.
     - Text starting with '/' is classified immediately as 'command' in code without calling the LLM.
+    - Truncates input to 4,000 characters before the LLM call.
     - Uses the FAST model tier via chat_json.
     - Delimits user text as data inside <user_text>...</user_text>.
     - Defaults to RouterResult(intent='question', cleaned_note=None) if chat_json returns None.
     """
     stripped_text = text.strip()
 
+    # Empty or whitespace-only input returns smalltalk in code
+    if not stripped_text:
+        return RouterResult(intent="smalltalk", cleaned_note=None)
+
     # Slash-commands are classified in code without an LLM call
     if stripped_text.startswith("/"):
         return RouterResult(intent="command", cleaned_note=None)
 
+    # Truncate input to 4,000 characters before the LLM call
+    truncated_text = text[:4000]
+
     messages = [
         {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
-        {"role": "user", "content": f"<user_text>\n{text}\n</user_text>"},
+        {"role": "user", "content": f"<user_text>\n{truncated_text}\n</user_text>"},
     ]
 
     result = await chat_json(tier="fast", messages=messages, schema=RouterResult)
