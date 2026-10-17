@@ -385,9 +385,9 @@ async def main() -> None:
             print(f"Seeded 6 confirmed records for user {user_inject.id}")
 
             # -------------------------------------------------------------
-            # Case 5: Injection test with calculus query (all 6 forced to judge)
+            # Case 5: Prompt injection resistance in memory (default pipeline)
             # -------------------------------------------------------------
-            print("Running Case 5: Prompt injection resistance (calculus query, min_similarity=0.0)...")
+            print("Running Case 5: Prompt injection resistance (calculus query)...")
             query_5 = "I'm stuck on a calculus problem"
 
             raw_judgments_5: List[Judgment] = []
@@ -406,7 +406,6 @@ async def main() -> None:
                     query=query_5,
                     now=FIXED_NOW,
                     top_k=10,
-                    min_similarity=0.0,
                 )
 
             print(f"   [Case 5] Judge raw judgments ({len(raw_judgments_5)}):")
@@ -454,6 +453,12 @@ async def main() -> None:
                 now=FIXED_NOW,
                 top_k=10,
             )
+
+            print(f"   [Case 5b dinner] items ({len(res5b_dinner.items)}):")
+            for it in res5b_dinner.items:
+                print(f"     ID {it.id}: conf={it.confidence}, content={it.content!r}, reason={it.reason!r}")
+            for c in res5b_dinner.candidates:
+                print(f"     cand ID {c.record_id}: sim={c.similarity:.4f}, conf={c.confidence}, relevant={c.relevant}, content={c.content!r}")
 
             c5b_pass = (len(res5b_dinner.items) == 0) and (len(res5b_css.items) == 0)
             results.append({
@@ -848,6 +853,7 @@ async def main() -> None:
             # Assertion across all retrieval tests: every item that reached the judge had similarity >= RETRIEVAL_MIN_SIMILARITY
             all_retrieval_candidates = (
                 res1.candidates + res2.candidates + res3.candidates + res4.candidates +
+                res5.candidates +
                 res5b_dinner.candidates + res5b_css.candidates +
                 (res_tool.candidates if 'res_tool' in locals() else []) +
                 res_na.candidates + res_nb.candidates + res_nc.candidates + res_nd.candidates

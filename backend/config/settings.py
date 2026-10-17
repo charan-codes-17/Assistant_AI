@@ -51,7 +51,7 @@ class Settings(BaseSettings):
         description="Max candidate records to retrieve from vector search",
     )
     RETRIEVAL_MIN_SIMILARITY: float = Field(
-        default=0.55,
+        default=0.40,
         description="Minimum cosine similarity for retrieval candidates",
     )
     RELEVANCE_MIN_CONFIDENCE: int = Field(
