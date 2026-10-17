@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     # Nebius Token Factory (OpenAI-compatible)
     NEBIUS_API_KEY: str = Field(default="", description="Nebius Token Factory API key")
     NEBIUS_BASE_URL: str = Field(
-        default="https://api.tokenfactory.us-central1.nebius.com/v1/",
+        default="https://api.tokenfactory.nebius.com/v1/",
     )
 
     # Chat model IDs: verify exact IDs in the Nebius console; never hardcode in services.
