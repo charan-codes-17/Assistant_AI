@@ -5,10 +5,12 @@ flags contradictions against stored commitments, goals, or memories, and enforce
 NEVER writes to the database.
 """
 
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 import logging
 import re
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select
@@ -52,6 +54,13 @@ class InterventionDecision(BaseModel):
     act: Optional[ActionDirective] = None
     requires_confirmation: bool = False
     reason: str = ""
+
+
+class ReminderPhrasing(BaseModel):
+    """Reasoning-tier phrasing for deadline reminder."""
+    message: str = Field(
+        description="A concise reminder message (max 2 plain sentences, no emoji, no exclamation marks) mentioning the task title and local due time"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -248,54 +257,150 @@ async def decide_intervention(
     """
     ref_now = now if now is not None else datetime.now(timezone.utc)
 
-    # -------------------------------------------------------------------------
-    # CODE GUARDS before any LLM call
-    # -------------------------------------------------------------------------
+    # =========================================================================
+    # SCHEDULER TRIGGER (All eligibility decided in CODE with 0 LLM call)
+    # =========================================================================
     if trigger == "scheduler":
         if user.quiet_mode:
             logger.info("Intervention guard: quiet mode active, returning none.")
             return InterventionDecision(action="none", reason="Quiet mode is active")
 
-        if task is None or task.status != "open":
-            logger.info("Intervention guard: task is not open, returning none.")
-            return InterventionDecision(action="none", reason="Task is not open")
+        if task is None:
+            logger.info("Intervention guard: task is None, returning none.")
+            return InterventionDecision(action="none", reason="No task provided")
 
-        if task.snoozed_until is not None and task.snoozed_until > ref_now:
-            logger.info("Intervention guard: task is snoozed until future, returning none.")
-            return InterventionDecision(action="none", reason="Task is snoozed")
+        # Timezone-aware normalization for comparison
+        task_due = task.due_at
+        now_cmp = ref_now
+        if task_due is not None:
+            if task_due.tzinfo is None and now_cmp.tzinfo is not None:
+                task_due = task_due.replace(tzinfo=now_cmp.tzinfo)
+            elif task_due.tzinfo is not None and now_cmp.tzinfo is None:
+                now_cmp = now_cmp.replace(tzinfo=task_due.tzinfo)
 
+        # Task status check: a task with status snoozed counts as open only if snoozed_until <= now
+        is_open = False
+        if task.status == "open":
+            if task.snoozed_until is not None:
+                snooze_cmp = task.snoozed_until
+                if snooze_cmp.tzinfo is None and now_cmp.tzinfo is not None:
+                    snooze_cmp = snooze_cmp.replace(tzinfo=now_cmp.tzinfo)
+                elif snooze_cmp.tzinfo is not None and now_cmp.tzinfo is None:
+                    snooze_cmp = snooze_cmp.replace(tzinfo=None)
+                if snooze_cmp <= now_cmp:
+                    is_open = True
+            else:
+                is_open = True
+        elif task.status == "snoozed":
+            if task.snoozed_until is not None:
+                snooze_cmp = task.snoozed_until
+                if snooze_cmp.tzinfo is None and now_cmp.tzinfo is not None:
+                    snooze_cmp = snooze_cmp.replace(tzinfo=now_cmp.tzinfo)
+                elif snooze_cmp.tzinfo is not None and now_cmp.tzinfo is None:
+                    snooze_cmp = snooze_cmp.replace(tzinfo=None)
+                if snooze_cmp <= now_cmp:
+                    is_open = True
+
+        if not is_open:
+            logger.info("Intervention guard: task is not open/snoozed, returning none.")
+            reason = "Task is snoozed" if (task.status == "snoozed" or (task.snoozed_until and task.snoozed_until > now_cmp)) else "Task is not open"
+            return InterventionDecision(action="none", reason=reason)
+
+        if task_due is None:
+            logger.info("Intervention guard: task.due_at is None, returning none.")
+            return InterventionDecision(action="none", reason="Task has no due date")
+
+        lead_delta = timedelta(minutes=settings.REMINDER_LEAD_MINUTES)
+
+        # task.due_at > now + REMINDER_LEAD_MINUTES ("not yet due")
+        if task_due > now_cmp + lead_delta:
+            logger.info("Intervention guard: task not yet due, returning none.")
+            return InterventionDecision(action="none", reason="Task is not yet due")
+
+        # task.last_reminded_at is not None and task.last_reminded_at >= task.due_at - REMINDER_LEAD_MINUTES
         if task.last_reminded_at is not None:
-            elapsed = (ref_now - task.last_reminded_at).total_seconds()
-            if elapsed < 6 * 3600:
-                logger.info("Intervention guard: task was reminded within 6h, returning none.")
+            last_rem = task.last_reminded_at
+            if last_rem.tzinfo is None and task_due.tzinfo is not None:
+                last_rem = last_rem.replace(tzinfo=task_due.tzinfo)
+            elif last_rem.tzinfo is not None and task_due.tzinfo is None:
+                task_due_cmp = task_due.replace(tzinfo=last_rem.tzinfo)
+            else:
+                task_due_cmp = task_due
+
+            if last_rem >= task_due_cmp - lead_delta:
+                logger.info("Intervention guard: task already reminded for this due time, returning none.")
                 return InterventionDecision(
                     action="none",
-                    reason="Task was reminded within the last 6 hours",
+                    reason="Task already reminded for this due time",
                 )
 
-    elif trigger == "conversation":
-        if not text or not text.strip():
-            logger.info("Intervention guard: text is empty, returning none.")
-            return InterventionDecision(action="none", reason="Empty conversation input")
+        # ---------------------------------------------------------------------
+        # Task is eligible for reminder!
+        # ---------------------------------------------------------------------
+        try:
+            user_tz = ZoneInfo(user.timezone or "Asia/Kolkata")
+        except Exception:
+            user_tz = timezone.utc
 
-    # -------------------------------------------------------------------------
-    # Gather context from database
-    # -------------------------------------------------------------------------
-    tasks_ctx, goals_ctx = await gather_context(session, user, ref_now)
+        local_due = task_due.astimezone(user_tz)
+        local_time_str = local_due.strftime("%Y-%m-%d %H:%M %Z").strip()
+        templated_message = f"Reminder: {task.title} is due {local_time_str}"
 
-    # If trigger is scheduler and a task object was provided, ensure it is in the tasks context
-    if trigger == "scheduler" and task is not None:
-        if not any(t["id"] == task.id for t in tasks_ctx):
-            tasks_ctx.insert(
-                0,
-                {
-                    "id": task.id,
-                    "title": task.title,
-                    "due_at": task.due_at.isoformat() if task.due_at else None,
-                    "status": task.status,
-                    "origin": task.origin,
-                },
+        phrasing_system = (
+            "You are the reminder phrasing engine for a personal AI assistant.\n"
+            "Your ONLY job is to phrase a concise reminder message for the user.\n"
+            "Rules:\n"
+            "1. At most TWO plain sentences.\n"
+            "2. Strictly NO emojis, NO praise, NO simulated emotion, and NO exclamation marks.\n"
+            f"3. MUST mention the task title '{task.title}' and the local due time '{local_time_str}'.\n"
+            "Respond with strict JSON matching:\n"
+            '{\n  "message": "<plain text message>"\n}'
+        )
+        phrasing_user = f"Phrase a reminder message for: task '{task.title}' due at {local_time_str}."
+
+        phrased_msg: Optional[str] = None
+        phrased_reason: Optional[str] = None
+        try:
+            resp = await asyncio.wait_for(
+                chat_json(
+                    tier="reasoning",
+                    messages=[
+                        {"role": "system", "content": phrasing_system},
+                        {"role": "user", "content": phrasing_user},
+                    ],
+                    schema=ReminderPhrasing,
+                ),
+                timeout=5.0,
             )
+            if resp is not None:
+                raw_m = getattr(resp, "message", None) or (resp.get("message") if isinstance(resp, dict) else None)
+                if raw_m and isinstance(raw_m, str) and raw_m.strip():
+                    candidate_msg = _strip_sentences(raw_m, max_sentences=2)
+                    if candidate_msg and task.title.lower() in candidate_msg.lower():
+                        phrased_msg = candidate_msg
+                phrased_reason = getattr(resp, "reason", None) or (resp.get("reason") if isinstance(resp, dict) else None)
+        except Exception as exc:
+            logger.warning("Scheduler reminder phrasing call failed or timed out: %s. Using templated message.", exc)
+            phrased_msg = None
+
+        final_msg = phrased_msg if (phrased_msg and phrased_msg.strip()) else templated_message
+        final_msg = _strip_sentences(final_msg, max_sentences=2) or templated_message
+        return InterventionDecision(
+            action="remind",
+            message=final_msg,
+            target_task_id=task.id,
+            reason=phrased_reason or "Scheduler reminder for due task",
+        )
+
+    # =========================================================================
+    # CONVERSATION TRIGGER
+    # =========================================================================
+    if not text or not text.strip():
+        logger.info("Intervention guard: text is empty, returning none.")
+        return InterventionDecision(action="none", reason="Empty conversation input")
+
+    # Gather context from database
+    tasks_ctx, goals_ctx = await gather_context(session, user, ref_now)
 
     # Format delimited DATA blocks
     now_str = ref_now.strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -319,11 +424,9 @@ async def decide_intervention(
     ]
     mem_block = "\n".join(mem_lines) if mem_lines else "(None)"
 
-    user_msg_content = text if text else f"(Scheduler trigger for Task ID {task.id if task else 'unknown'})"
-
     user_prompt = (
         f"<trigger>\n{trigger}\n</trigger>\n\n"
-        f"<user_message>\n{user_msg_content}\n</user_message>\n\n"
+        f"<user_message>\n{text}\n</user_message>\n\n"
         f"<active_tasks>\n{tasks_block}\n</active_tasks>\n\n"
         f"<active_goals>\n{goals_block}\n</active_goals>\n\n"
         f"<retrieved_memories>\n{mem_block}\n</retrieved_memories>"
@@ -337,26 +440,32 @@ async def decide_intervention(
         {"role": "user", "content": user_prompt},
     ]
 
-    # Call reasoning tier
-    decision = await chat_json(tier="reasoning", messages=messages, schema=InterventionDecision)
+    # Call reasoning tier with 15-second timeout, failing closed to none
+    try:
+        decision = await asyncio.wait_for(
+            chat_json(tier="reasoning", messages=messages, schema=InterventionDecision),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Conversation intervention LLM call timed out after 15s. Failing closed.")
+        return InterventionDecision(action="none", reason="Conversation reasoning timed out")
+    except Exception as exc:
+        logger.warning("Conversation intervention LLM call failed: %s. Failing closed.", exc)
+        return InterventionDecision(action="none", reason="LLM judgment failed closed")
 
-    # -------------------------------------------------------------------------
-    # Fail closed if LLM call fails
-    # -------------------------------------------------------------------------
+    # Fail closed if LLM call returns None
     if decision is None:
         logger.warning("Intervention chat_json returned None. Failing closed with action='none'.")
         return InterventionDecision(action="none", reason="LLM judgment failed closed")
 
-    # -------------------------------------------------------------------------
     # CODE VALIDATION after parsing
-    # -------------------------------------------------------------------------
     context_task_ids = {t["id"] for t in tasks_ctx}
     goal_ids = {g["id"] for g in goals_ctx}
     retrieved_map = {it.record_id: it for it in retrieval_items}
 
-    # Validate remind
+    # Validate remind in conversation (remind is scheduler-only or requires valid task)
     if decision.action == "remind":
-        target_id = decision.target_task_id or (task.id if task else None)
+        target_id = decision.target_task_id
         if target_id not in context_task_ids:
             logger.warning("Invalid target_task_id %s for remind; downgrading to none.", target_id)
             decision.action = "none"

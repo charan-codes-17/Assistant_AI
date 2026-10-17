@@ -1,0 +1,324 @@
+"""backend/services/actions.py
+Action executor service for AI Assistant per PRD §4.4, §10.1 and Roadmap §3.2.
+Applies verified directives, memory state transitions (confirm, reject, edit, delete, supersede),
+task updates (mark_done, snooze, reschedule, mark_reminded), and quiet mode toggles.
+
+Guarantees:
+- Every mutating function verifies the record/task belongs to the user and raises NotFoundError
+  (or returns None for confirm/reject) to prevent forged Telegram button callback execution.
+- delete_record and apply_directive require confirmed=True, otherwise raising PermissionError.
+- reschedule_task requires a timezone-aware datetime.
+- Each function commits its own database transaction.
+- Re-exports confirm_task from extraction.py.
+"""
+
+from datetime import datetime, timedelta, timezone
+import logging
+from typing import Any, Optional, Tuple
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.models.models import KnowledgeRecord, Task, User
+from backend.services.embeddings import embed_texts
+from backend.services.extraction import confirm_task
+
+logger = logging.getLogger(__name__)
+
+
+class NotFoundError(Exception):
+    """Raised when an entity is not found or does not belong to the user."""
+    pass
+
+
+async def confirm_record(
+    session: AsyncSession,
+    user: User,
+    record_id: int,
+) -> Optional[KnowledgeRecord]:
+    """Confirm a pending memory record.
+
+    - If record doesn't belong to user or doesn't exist: returns None.
+    - If status is rejected: returns None.
+    - If already confirmed: returns unchanged (idempotent).
+    - If pending: changes status to 'confirmed', commits, and returns record.
+    """
+    stmt = select(KnowledgeRecord).where(
+        KnowledgeRecord.id == record_id,
+        KnowledgeRecord.user_id == user.id,
+    )
+    rec = (await session.execute(stmt)).scalar_one_or_none()
+    if rec is None:
+        logger.warning("confirm_record: record %s not found for user %s", record_id, user.id)
+        return None
+    if rec.status == "rejected":
+        logger.info("confirm_record: record %s is rejected, returning None", record_id)
+        return None
+    if rec.status == "confirmed":
+        return rec
+
+    rec.status = "confirmed"
+    await session.commit()
+    await session.refresh(rec)
+    return rec
+
+
+async def reject_record(
+    session: AsyncSession,
+    user: User,
+    record_id: int,
+) -> Optional[KnowledgeRecord]:
+    """Soft-reject a memory record (pending -> rejected).
+
+    - If record doesn't belong to user or doesn't exist: returns None.
+    - Commits and returns the record.
+    """
+    stmt = select(KnowledgeRecord).where(
+        KnowledgeRecord.id == record_id,
+        KnowledgeRecord.user_id == user.id,
+    )
+    rec = (await session.execute(stmt)).scalar_one_or_none()
+    if rec is None:
+        logger.warning("reject_record: record %s not found for user %s", record_id, user.id)
+        return None
+
+    rec.status = "rejected"
+    await session.commit()
+    await session.refresh(rec)
+    return rec
+
+
+async def edit_record(
+    session: AsyncSession,
+    user: User,
+    record_id: int,
+    new_content: str,
+) -> KnowledgeRecord:
+    """Update content and re-embed with embeddings.embed_texts. Status remains unchanged."""
+    stmt = select(KnowledgeRecord).where(
+        KnowledgeRecord.id == record_id,
+        KnowledgeRecord.user_id == user.id,
+    )
+    rec = (await session.execute(stmt)).scalar_one_or_none()
+    if rec is None:
+        raise NotFoundError(f"KnowledgeRecord {record_id} not found for user {user.id}")
+
+    rec.content = new_content
+    vecs = await embed_texts([new_content])
+    rec.embedding = vecs[0]
+    await session.commit()
+    await session.refresh(rec)
+    return rec
+
+
+async def delete_record(
+    session: AsyncSession,
+    user: User,
+    record_id: int,
+    *,
+    confirmed: bool,
+) -> None:
+    """Hard-delete a memory record. Requires explicit confirmed=True."""
+    if not confirmed:
+        raise PermissionError("delete_record requires confirmed=True")
+
+    stmt = select(KnowledgeRecord).where(
+        KnowledgeRecord.id == record_id,
+        KnowledgeRecord.user_id == user.id,
+    )
+    rec = (await session.execute(stmt)).scalar_one_or_none()
+    if rec is None:
+        raise NotFoundError(f"KnowledgeRecord {record_id} not found for user {user.id}")
+
+    await session.delete(rec)
+    await session.commit()
+
+
+async def supersede_record(
+    session: AsyncSession,
+    user: User,
+    old_id: int,
+    new_id: int,
+) -> Tuple[KnowledgeRecord, KnowledgeRecord]:
+    """Supersede an existing record with a new one.
+
+    - Confirms new record.
+    - Sets old.superseded_by = new_id.
+    - Both records must belong to user.
+    """
+    stmt_old = select(KnowledgeRecord).where(
+        KnowledgeRecord.id == old_id,
+        KnowledgeRecord.user_id == user.id,
+    )
+    old_rec = (await session.execute(stmt_old)).scalar_one_or_none()
+    if old_rec is None:
+        raise NotFoundError(f"Old KnowledgeRecord {old_id} not found for user {user.id}")
+
+    stmt_new = select(KnowledgeRecord).where(
+        KnowledgeRecord.id == new_id,
+        KnowledgeRecord.user_id == user.id,
+    )
+    new_rec = (await session.execute(stmt_new)).scalar_one_or_none()
+    if new_rec is None:
+        raise NotFoundError(f"New KnowledgeRecord {new_id} not found for user {user.id}")
+
+    new_rec.status = "confirmed"
+    old_rec.superseded_by = new_id
+
+    await session.commit()
+    await session.refresh(old_rec)
+    await session.refresh(new_rec)
+    return old_rec, new_rec
+
+
+async def mark_task_done(
+    session: AsyncSession,
+    user: User,
+    task_id: int,
+) -> Task:
+    """Mark a user task as done."""
+    stmt = select(Task).where(
+        Task.id == task_id,
+        Task.user_id == user.id,
+    )
+    task = (await session.execute(stmt)).scalar_one_or_none()
+    if task is None:
+        raise NotFoundError(f"Task {task_id} not found for user {user.id}")
+
+    task.status = "done"
+    await session.commit()
+    await session.refresh(task)
+    return task
+
+
+async def snooze_task(
+    session: AsyncSession,
+    user: User,
+    task_id: int,
+    minutes: int = 60,
+    now: Optional[datetime] = None,
+) -> Task:
+    """Snooze a task for specified minutes.
+
+    Sets status='snoozed', snoozed_until=now+minutes, last_reminded_at=None.
+    """
+    stmt = select(Task).where(
+        Task.id == task_id,
+        Task.user_id == user.id,
+    )
+    task = (await session.execute(stmt)).scalar_one_or_none()
+    if task is None:
+        raise NotFoundError(f"Task {task_id} not found for user {user.id}")
+
+    ref_now = now or datetime.now(timezone.utc)
+    task.status = "snoozed"
+    task.snoozed_until = ref_now + timedelta(minutes=minutes)
+    task.last_reminded_at = None
+    await session.commit()
+    await session.refresh(task)
+    return task
+
+
+async def mark_reminded(
+    session: AsyncSession,
+    task_id: int,
+    now: Optional[datetime] = None,
+) -> Task:
+    """Update last_reminded_at on task (called by scheduler worker)."""
+    stmt = select(Task).where(Task.id == task_id)
+    task = (await session.execute(stmt)).scalar_one_or_none()
+    if task is None:
+        raise NotFoundError(f"Task {task_id} not found")
+
+    task.last_reminded_at = now or datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(task)
+    return task
+
+
+async def reschedule_task(
+    session: AsyncSession,
+    user: User,
+    task_id: int,
+    new_due_at: datetime,
+) -> Task:
+    """Reschedule task to a new due_at.
+
+    Requires timezone-aware datetime. Sets status='open', snoozed_until=None, last_reminded_at=None.
+    """
+    if new_due_at.tzinfo is None:
+        raise ValueError("new_due_at must be a timezone-aware datetime")
+
+    stmt = select(Task).where(
+        Task.id == task_id,
+        Task.user_id == user.id,
+    )
+    task = (await session.execute(stmt)).scalar_one_or_none()
+    if task is None:
+        raise NotFoundError(f"Task {task_id} not found for user {user.id}")
+
+    task.due_at = new_due_at
+    task.status = "open"
+    task.snoozed_until = None
+    task.last_reminded_at = None
+    await session.commit()
+    await session.refresh(task)
+    return task
+
+
+async def apply_directive(
+    session: AsyncSession,
+    user: User,
+    directive: Any,
+    *,
+    confirmed: bool,
+) -> Any:
+    """Apply an action directive (mark_done, snooze, reschedule). Requires confirmed=True."""
+    if not confirmed:
+        raise PermissionError("apply_directive requires confirmed=True")
+
+    d_type = getattr(directive, "type", None) or (directive.get("type") if isinstance(directive, dict) else None)
+    d_task_id = getattr(directive, "task_id", None) or (directive.get("task_id") if isinstance(directive, dict) else None)
+    d_new_due = getattr(directive, "new_due_at", None) or (directive.get("new_due_at") if isinstance(directive, dict) else None)
+
+    if d_type == "mark_done":
+        return await mark_task_done(session, user, d_task_id)
+    elif d_type == "snooze":
+        return await snooze_task(session, user, d_task_id)
+    elif d_type == "reschedule":
+        if isinstance(d_new_due, str):
+            d_new_due = datetime.fromisoformat(d_new_due)
+        return await reschedule_task(session, user, d_task_id, d_new_due)
+    else:
+        raise ValueError(f"Unsupported directive type: {d_type}")
+
+
+async def set_quiet_mode(
+    session: AsyncSession,
+    user: User,
+    value: bool,
+) -> User:
+    """Enable or disable quiet mode for the user."""
+    user.quiet_mode = value
+    session.add(user)
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+__all__ = [
+    "NotFoundError",
+    "confirm_record",
+    "reject_record",
+    "edit_record",
+    "delete_record",
+    "supersede_record",
+    "mark_task_done",
+    "snooze_task",
+    "mark_reminded",
+    "reschedule_task",
+    "apply_directive",
+    "set_quiet_mode",
+    "confirm_task",
+]
+

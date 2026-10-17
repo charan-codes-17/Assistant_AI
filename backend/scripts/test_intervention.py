@@ -202,7 +202,7 @@ async def main() -> None:
                 lat = round(time.perf_counter() - t0, 3)
                 print(f"\n[{case_id}] {name} ({lat}s):")
                 print(f"  Decision: action={dec.action!r}, contradiction={dec.contradiction}, reason={dec.reason!r}")
-                if dec.message:
+                if dec.action != "none" or dec.message:
                     print(f"  Message: {dec.message!r}")
                 if dec.contradiction:
                     print(f"  Conflict: {dec.conflicts_with}, detail={dec.contradiction_detail!r}, Q={dec.clarifying_question!r}")
@@ -447,12 +447,12 @@ async def main() -> None:
             # =============================================================
 
             # -------------------------------------------------------------
-            # Case 10: now = 2026-10-18 08:00 IST, Task A open, due 09:00 -> remind
+            # Case 10: now = 2026-10-18 08:30 IST, Task A open, due 09:00 -> remind
             # -------------------------------------------------------------
-            now_10 = datetime(2026, 10, 18, 8, 0, 0, tzinfo=IST_TZ)
+            now_10 = datetime(2026, 10, 18, 8, 30, 0, tzinfo=IST_TZ)
             dec10, lat10 = await run_case(
                 "Case-10",
-                "Scheduler: Task A due in 1 hour -> remind",
+                "Scheduler: Task A due in 30 mins -> remind",
                 trigger="scheduler",
                 task_arg=task_a,
                 now_arg=now_10,
@@ -474,9 +474,9 @@ async def main() -> None:
             })
 
             # -------------------------------------------------------------
-            # Case 11: Same but user.quiet_mode=True -> none and 0 LLM calls
+            # Case 10b: now = 2026-10-17 12:00 IST -> none, 0 LLM calls ("not yet due")
             # -------------------------------------------------------------
-            user.quiet_mode = True
+            now_10b = datetime(2026, 10, 17, 12, 0, 0, tzinfo=IST_TZ)
             fake_llm_counter = 0
             orig_chat_json = intervention_module.chat_json
 
@@ -485,6 +485,29 @@ async def main() -> None:
                 fake_llm_counter += 1
                 return await orig_chat_json(*args, **kwargs)
 
+            with unittest.mock.patch.object(intervention_module, "chat_json", side_effect=mock_chat_json_guard):
+                dec10b, lat10b = await run_case(
+                    "Case-10b",
+                    "Scheduler guard: task not yet due (21h away)",
+                    trigger="scheduler",
+                    task_arg=task_a,
+                    now_arg=now_10b,
+                )
+            c10b_pass = dec10b.action == "none" and fake_llm_counter == 0
+            results.append({
+                "id": "Case-10b",
+                "name": "Scheduler guard: not yet due",
+                "expected": "action=none, 0 LLM calls",
+                "actual": f"action={dec10b.action}, calls={fake_llm_counter}",
+                "status": "PASS" if c10b_pass else "FAIL",
+                "detail": f"Guard prevented LLM call (calls={fake_llm_counter}) ({lat10b}s)",
+            })
+
+            # -------------------------------------------------------------
+            # Case 11: Same but user.quiet_mode=True -> none and 0 LLM calls
+            # -------------------------------------------------------------
+            user.quiet_mode = True
+            fake_llm_counter = 0
             with unittest.mock.patch.object(intervention_module, "chat_json", side_effect=mock_chat_json_guard):
                 dec11, lat11 = await run_case(
                     "Case-11",
@@ -533,20 +556,20 @@ async def main() -> None:
             })
 
             # -------------------------------------------------------------
-            # Case 13: last_reminded_at = now minus 1 hour -> none and 0 LLM calls
+            # Case 13: last_reminded_at = now minus 10 minutes -> none and 0 LLM calls
             # -------------------------------------------------------------
             task_reminded = Task(
                 id=task_a.id,
                 title=task_a.title,
                 status="open",
                 due_at=task_a.due_at,
-                last_reminded_at=now_10 - timedelta(hours=1),
+                last_reminded_at=now_10 - timedelta(minutes=10),
             )
             fake_llm_counter = 0
             with unittest.mock.patch.object(intervention_module, "chat_json", side_effect=mock_chat_json_guard):
                 dec13, lat13 = await run_case(
                     "Case-13",
-                    "Scheduler guard: reminded 1h ago (< 6h)",
+                    "Scheduler guard: reminded 10m ago (in window)",
                     trigger="scheduler",
                     task_arg=task_reminded,
                     now_arg=now_10,
@@ -554,7 +577,7 @@ async def main() -> None:
             c13_pass = dec13.action == "none" and fake_llm_counter == 0
             results.append({
                 "id": "Case-13",
-                "name": "Scheduler guard: last_reminded_at < 6h",
+                "name": "Scheduler guard: reminded within window",
                 "expected": "action=none, 0 LLM calls",
                 "actual": f"action={dec13.action}, calls={fake_llm_counter}",
                 "status": "PASS" if c13_pass else "FAIL",
@@ -590,6 +613,90 @@ async def main() -> None:
                 "detail": f"action={dec14.action}, calls={fake_llm_counter} ({lat14}s)",
             })
 
+            # -------------------------------------------------------------
+            # Case 15: Overdue task (now=2026-10-18 11:00, never reminded) -> remind
+            # -------------------------------------------------------------
+            now_15 = datetime(2026, 10, 18, 11, 0, 0, tzinfo=IST_TZ)
+            dec15, lat15 = await run_case(
+                "Case-15",
+                "Scheduler: overdue task never reminded -> remind",
+                trigger="scheduler",
+                task_arg=task_a,
+                now_arg=now_15,
+            )
+            c15_pass = (
+                dec15.action == "remind"
+                and dec15.target_task_id == task_a.id
+                and "arun" in (dec15.message or "").lower()
+            )
+            results.append({
+                "id": "Case-15",
+                "name": "Scheduler: overdue task never reminded",
+                "expected": f"action=remind, target={task_a.id}",
+                "actual": f"action={dec15.action}, target={dec15.target_task_id}",
+                "status": "PASS" if c15_pass else "FAIL",
+                "detail": f"msg={dec15.message!r} ({lat15}s)",
+            })
+
+            # -------------------------------------------------------------
+            # Case 16: Overdue task with last_reminded_at=2026-10-18 08:45 -> none, 0 LLM calls
+            # -------------------------------------------------------------
+            task_overdue_reminded = Task(
+                id=task_a.id,
+                title=task_a.title,
+                status="open",
+                due_at=task_a.due_at,
+                last_reminded_at=datetime(2026, 10, 18, 8, 45, 0, tzinfo=IST_TZ),
+            )
+            fake_llm_counter = 0
+            with unittest.mock.patch.object(intervention_module, "chat_json", side_effect=mock_chat_json_guard):
+                dec16, lat16 = await run_case(
+                    "Case-16",
+                    "Scheduler guard: overdue already reminded",
+                    trigger="scheduler",
+                    task_arg=task_overdue_reminded,
+                    now_arg=now_15,
+                )
+            c16_pass = dec16.action == "none" and fake_llm_counter == 0
+            results.append({
+                "id": "Case-16",
+                "name": "Scheduler guard: overdue already reminded",
+                "expected": "action=none, 0 LLM calls",
+                "actual": f"action={dec16.action}, calls={fake_llm_counter}",
+                "status": "PASS" if c16_pass else "FAIL",
+                "detail": f"action={dec16.action}, calls={fake_llm_counter} ({lat16}s)",
+            })
+
+            # -------------------------------------------------------------
+            # Case 17: Fake LLM returns None on scheduler path -> still remind with templated message
+            # -------------------------------------------------------------
+            async def fake_llm_none_scheduler(*args: Any, **kwargs: Any) -> Any:
+                return None
+
+            with unittest.mock.patch.object(intervention_module, "chat_json", side_effect=fake_llm_none_scheduler):
+                dec17, lat17 = await run_case(
+                    "Case-17",
+                    "Scheduler fail-open: LLM returns None -> templated remind",
+                    trigger="scheduler",
+                    task_arg=task_a,
+                    now_arg=now_10,
+                )
+            local_due_17 = task_a.due_at.astimezone(IST_TZ).strftime("%Y-%m-%d %H:%M %Z").strip()
+            expected_template = f"Reminder: {task_a.title} is due {local_due_17}"
+            c17_pass = (
+                dec17.action == "remind"
+                and dec17.target_task_id == task_a.id
+                and dec17.message == expected_template
+            )
+            results.append({
+                "id": "Case-17",
+                "name": "Scheduler fail-open: templated remind",
+                "expected": f"action=remind, message={expected_template!r}",
+                "actual": f"action={dec17.action}, message={dec17.message!r}",
+                "status": "PASS" if c17_pass else "FAIL",
+                "detail": f"msg={dec17.message!r} ({lat17}s)",
+            })
+
             # =============================================================
             # Unit Tests with Fake LLM
             # =============================================================
@@ -621,7 +728,7 @@ async def main() -> None:
                 )
 
             with unittest.mock.patch.object(intervention_module, "chat_json", side_effect=fake_llm_bad_remind):
-                dec_u_b, _ = await run_case("Unit-b", "Remind with invalid task ID", trigger="scheduler", task_arg=task_a, now_arg=now_10)
+                dec_u_b, _ = await run_case("Unit-b", "Remind with invalid task ID", trigger="conversation", text="remind me")
             ub_pass = dec_u_b.action == "none" and dec_u_b.target_task_id is None
             results.append({
                 "id": "Unit-b",

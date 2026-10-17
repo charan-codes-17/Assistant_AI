@@ -59,6 +59,12 @@ class Settings(BaseSettings):
         description="Minimum confidence score (0-100) for relevance judgment",
     )
 
+    # Intervention & Scheduler Reminders
+    REMINDER_LEAD_MINUTES: int = Field(
+        default=60,
+        description="Lead time in minutes before task due_at to fire deadline reminders",
+    )
+
     # Auth (needed from Phase 7; no insecure default)
     JWT_SECRET: str = Field(default="", description="Required in Phase 7")
 

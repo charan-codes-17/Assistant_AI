@@ -517,6 +517,105 @@ async def main() -> None:
                 "detail": f"staged={len(res11.staged_records)}, matched_sim={matched_sim:.4f} < {settings.DEDUPE_THRESHOLD} ({lat11}s)",
             })
 
+            # -------------------------------------------------------------
+            # Case 12: Relative time "in 10 minutes"
+            # -------------------------------------------------------------
+            print("Running Case 12: Relative time 'in 10 minutes'...")
+            user_c12 = await create_test_user(session, "c12")
+            users_to_cleanup.append(user_c12.id)
+
+            t0 = time.perf_counter()
+            res12 = await extract_and_stage(
+                session=session,
+                user=user_c12,
+                text="I'll send Arun the PDF in 10 minutes",
+                source="text",
+                now=FIXED_NOW,
+            )
+            lat12 = round(time.perf_counter() - t0, 2)
+            expected_due_12 = datetime(2026, 10, 17, 10, 10, 0, tzinfo=IST_TZ)
+            has_task_12 = len(res12.pending_tasks) >= 1
+            actual_due_12 = res12.pending_tasks[0].due_at if has_task_12 else None
+            c12_pass = (
+                has_task_12
+                and res12.pending_tasks[0].origin == "promise"
+                and actual_due_12 == expected_due_12
+            )
+            results.append({
+                "id": "Case-12",
+                "name": "Relative time: in 10 minutes",
+                "expected": f"promise due {expected_due_12.isoformat()}",
+                "actual": f"due={actual_due_12.isoformat() if actual_due_12 else None}",
+                "status": "PASS" if c12_pass else "FAIL",
+                "detail": f"tasks={len(res12.pending_tasks)}, actual_due={actual_due_12} ({lat12}s)",
+            })
+
+            # -------------------------------------------------------------
+            # Case 13: Relative time "tonight at 8"
+            # -------------------------------------------------------------
+            print("Running Case 13: Relative time 'tonight at 8'...")
+            user_c13 = await create_test_user(session, "c13")
+            users_to_cleanup.append(user_c13.id)
+
+            t0 = time.perf_counter()
+            res13 = await extract_and_stage(
+                session=session,
+                user=user_c13,
+                text="I'll call Prof. Rao tonight at 8",
+                source="text",
+                now=FIXED_NOW,
+            )
+            lat13 = round(time.perf_counter() - t0, 2)
+            expected_due_13 = datetime(2026, 10, 17, 20, 0, 0, tzinfo=IST_TZ)
+            has_task_13 = len(res13.pending_tasks) >= 1
+            actual_due_13 = res13.pending_tasks[0].due_at if has_task_13 else None
+            c13_pass = (
+                has_task_13
+                and res13.pending_tasks[0].origin == "promise"
+                and actual_due_13 == expected_due_13
+            )
+            results.append({
+                "id": "Case-13",
+                "name": "Relative time: tonight at 8",
+                "expected": f"promise due {expected_due_13.isoformat()}",
+                "actual": f"due={actual_due_13.isoformat() if actual_due_13 else None}",
+                "status": "PASS" if c13_pass else "FAIL",
+                "detail": f"tasks={len(res13.pending_tasks)}, actual_due={actual_due_13} ({lat13}s)",
+            })
+
+            # -------------------------------------------------------------
+            # Case 14: Relative time "on Friday"
+            # -------------------------------------------------------------
+            print("Running Case 14: Relative time 'on Friday'...")
+            user_c14 = await create_test_user(session, "c14")
+            users_to_cleanup.append(user_c14.id)
+
+            t0 = time.perf_counter()
+            res14 = await extract_and_stage(
+                session=session,
+                user=user_c14,
+                text="I'll send Arun the PDF on Friday",
+                source="text",
+                now=FIXED_NOW,
+            )
+            lat14 = round(time.perf_counter() - t0, 2)
+            expected_due_14 = datetime(2026, 10, 23, 9, 0, 0, tzinfo=IST_TZ)
+            has_task_14 = len(res14.pending_tasks) >= 1
+            actual_due_14 = res14.pending_tasks[0].due_at if has_task_14 else None
+            c14_pass = (
+                has_task_14
+                and res14.pending_tasks[0].origin == "promise"
+                and actual_due_14 == expected_due_14
+            )
+            results.append({
+                "id": "Case-14",
+                "name": "Relative time: on Friday",
+                "expected": f"promise due {expected_due_14.isoformat()}",
+                "actual": f"due={actual_due_14.isoformat() if actual_due_14 else None}",
+                "status": "PASS" if c14_pass else "FAIL",
+                "detail": f"tasks={len(res14.pending_tasks)}, actual_due={actual_due_14} ({lat14}s)",
+            })
+
         finally:
             print("\nCleaning up all throwaway users...")
             for uid in users_to_cleanup:
