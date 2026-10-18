@@ -251,6 +251,11 @@ async def confirm_task_candidate(
     existing_rows = (await session.execute(stmt)).scalars().all()
     for row in existing_rows:
         if _due_at_equal(row.due_at, candidate.due_at):
+            if row.status == "pending":
+                # A staged candidate for the same (title, due_at): promote it instead of inserting.
+                row.status = "open"
+                await session.commit()
+                await session.refresh(row)
             return row
 
     task = Task(
@@ -264,6 +269,105 @@ async def confirm_task_candidate(
     await session.commit()
     await session.refresh(task)
     return task
+
+
+async def stage_task_candidates(
+    session: AsyncSession,
+    user: User,
+    candidates: Sequence[CandidateTask],
+) -> List[Task]:
+    """Stage extraction task candidates as persistent Task rows with status='pending'.
+
+    For each candidate, looks for an existing Task of this user with the same title and due_at
+    (compared with _due_at_equal):
+      - none found              -> insert Task(status='pending', origin=candidate.origin, ...);
+                                   the new row is included in the returned list.
+      - found, status 'pending' -> include that same row in the returned list (no duplicate).
+      - found, any other status -> skip (already saved); not returned.
+    Ownership-scoped (always user.id). A single commit at the end.
+    """
+    staged: List[Task] = []
+    for candidate in candidates:
+        stmt = select(Task).where(
+            Task.user_id == user.id,
+            Task.title == candidate.title,
+        )
+        existing_rows = (await session.execute(stmt)).scalars().all()
+        match: Optional[Task] = None
+        for row in existing_rows:
+            if _due_at_equal(row.due_at, candidate.due_at):
+                match = row
+                break
+
+        if match is None:
+            task = Task(
+                user_id=user.id,
+                title=candidate.title,
+                due_at=candidate.due_at,
+                status="pending",
+                origin=candidate.origin,
+            )
+            session.add(task)
+            await session.flush()  # make the row visible to later lookups in this transaction
+            staged.append(task)
+        elif match.status == "pending":
+            staged.append(match)
+        else:
+            continue
+
+    await session.commit()
+    for task in staged:
+        await session.refresh(task)
+    return staged
+
+
+async def confirm_pending_task(
+    session: AsyncSession,
+    user: User,
+    task_id: int,
+) -> Optional[Task]:
+    """Confirm a staged pending task: owned + status 'pending' -> 'open'.
+
+    - owned and status 'pending': set 'open', commit, return the row.
+    - owned and any other status: return it unchanged (idempotent; no write).
+    - not found or not owned by this user: return None (never touches another user's row).
+    """
+    stmt = select(Task).where(
+        Task.id == task_id,
+        Task.user_id == user.id,
+    )
+    task = (await session.execute(stmt)).scalar_one_or_none()
+    if task is None:
+        return None
+    if task.status != "pending":
+        return task
+
+    task.status = "open"
+    await session.commit()
+    await session.refresh(task)
+    return task
+
+
+async def discard_pending_task(
+    session: AsyncSession,
+    user: User,
+    task_id: int,
+) -> bool:
+    """Hard-delete a staged pending task ONLY if owned and status == 'pending'.
+
+    Returns True when a row was deleted; False otherwise (nothing else is changed).
+    """
+    stmt = select(Task).where(
+        Task.id == task_id,
+        Task.user_id == user.id,
+    )
+    task = (await session.execute(stmt)).scalar_one_or_none()
+    if task is None or task.status != "pending":
+        return False
+
+    await session.delete(task)
+    await session.commit()
+    return True
 
 
 async def mark_task_done(
@@ -418,5 +522,8 @@ __all__ = [
     "set_quiet_mode",
     "confirm_task",
     "confirm_task_candidate",
+    "stage_task_candidates",
+    "confirm_pending_task",
+    "discard_pending_task",
 ]
 
