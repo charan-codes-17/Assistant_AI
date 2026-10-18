@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     # Optional at import: the API service must start without it. The bot worker
     # checks it explicitly via settings.require("TELEGRAM_BOT_TOKEN") at startup.
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Dev or deployed bot token")
+    INVITE_CODES: str = Field(
+        default="",
+        description=(
+            "Comma-separated invite codes accepted by /start <code>. Compared case-sensitively "
+            "with hmac.compare_digest. Empty means nobody can sign up."
+        ),
+    )
+    BOT_MAX_USERS: int = Field(
+        default=25,
+        description="Max users the bot will sign up; further /start requests are refused.",
+    )
 
     # Whisper STT (local, CPU int8). Model directory = WHISPER_MODEL_ROOT/whisper-<name>.
     WHISPER_MODEL_NAME: str = Field(
