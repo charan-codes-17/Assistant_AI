@@ -286,6 +286,7 @@ async def main() -> None:
         "E1": {"E1A", "E1B"},
         "E6": {"E6A", "E6B"},
         "E7": {"E7A", "E7B"},
+        "E15": {"E15", "E15b"},
     }
 
     def want(eid: str) -> bool:
@@ -1238,14 +1239,13 @@ async def main() -> None:
                 ))
 
             # -----------------------------------------------------------------
-            # E15 Embedding timeout split: query path and batch path (unit, fake client)
+            # E15 Hedged query embedding (unit, fake client); E15b keeps the batch path
             # -----------------------------------------------------------------
-            if want("E15"):
-                print("\n[E15] Embedding timeouts: query path and batch path each retry once...")
+            if want("E15") or want("E15b"):
                 from backend.services import embeddings as emb_module
 
                 class _RetryEmbedder:
-                    """Times out on the first call, succeeds on the retry."""
+                    """Times out on the first call, succeeds on the retry (batch path)."""
 
                     def __init__(self) -> None:
                         self.calls = 0
@@ -1263,13 +1263,34 @@ async def main() -> None:
                             ]
                         )
 
+                class _ScriptedEmbedder:
+                    """Returns after a per-call delay (last delay repeats); counts calls."""
+
+                    def __init__(self, delays: List[float]) -> None:
+                        self.delays = delays
+                        self.calls = 0
+
+                    async def create(
+                        self, *, model: str, input: List[str], dimensions: int
+                    ) -> Any:
+                        idx = self.calls
+                        self.calls += 1
+                        delay = self.delays[idx] if idx < len(self.delays) else self.delays[-1]
+                        await asyncio.sleep(delay)
+                        return SimpleNamespace(
+                            data=[
+                                SimpleNamespace(index=i, embedding=[0.0] * dimensions)
+                                for i, _ in enumerate(input)
+                            ]
+                        )
+
                 class _FakeClient:
-                    def __init__(self, embedder: "_RetryEmbedder") -> None:
+                    def __init__(self, embedder: Any) -> None:
                         self.embeddings = embedder
 
                 emb_logger = logging.getLogger("backend.services.embeddings")
 
-                async def _run_case(
+                async def _run_batch_case(
                     patched_setting: str,
                     texts: List[str],
                     use_setting_attr: Optional[str],
@@ -1301,47 +1322,135 @@ async def main() -> None:
                         "vector_dim": len(vectors[0]) if vectors else None,
                     }
 
-                # Query path: retrieval passes settings.EMBEDDING_TIMEOUT_SECONDS explicitly.
-                query_res = await _run_case(
-                    "EMBEDDING_TIMEOUT_SECONDS", ["hello world"], "EMBEDDING_TIMEOUT_SECONDS"
-                )
-                # Batch path: no timeout arg -> defaults to EMBEDDING_BATCH_TIMEOUT_SECONDS.
-                batch_res = await _run_case(
-                    "EMBEDDING_BATCH_TIMEOUT_SECONDS", ["alpha", "beta"], None
-                )
+                async def _run_hedge_case(
+                    delays: List[float], hedge: float, budget: float
+                ) -> Dict[str, Any]:
+                    embedder = _ScriptedEmbedder(delays)
+                    counter = WarningCounter()
+                    emb_logger.addHandler(counter)
+                    loop = asyncio.get_running_loop()
+                    unretrieved: List[str] = []
 
-                e15_pass = (
-                    query_res["raised"] is None
-                    and query_res["attempts"] == 2
-                    and query_res["retry_logs"] == 1
-                    and query_res["vectors"] == 1
-                    and query_res["vector_dim"] == settings.EMBEDDING_DIM
-                )
-                e15b_pass = (
-                    batch_res["raised"] is None
-                    and batch_res["attempts"] == 2
-                    and batch_res["retry_logs"] == 1
-                    and batch_res["vectors"] == 2
-                    and batch_res["vector_dim"] == settings.EMBEDDING_DIM
-                )
-                results.append(row(
-                    "E15",
-                    "Query embedding timeout: retry then success",
-                    "query path uses EMBEDDING_TIMEOUT_SECONDS; first times out, one retry logged",
-                    e15_pass,
-                    f"attempts={query_res['attempts']} retry_logs={query_res['retry_logs']} "
-                    f"raised={query_res['raised']!r} vectors={query_res['vectors']}",
-                    f"vector_dim={query_res['vector_dim']} expected_dim={settings.EMBEDDING_DIM}",
-                ))
-                results.append(row(
-                    "E15b",
-                    "Batch embedding default timeout: retry then success",
-                    "no timeout arg -> EMBEDDING_BATCH_TIMEOUT_SECONDS; first times out, one retry logged",
-                    e15b_pass,
-                    f"attempts={batch_res['attempts']} retry_logs={batch_res['retry_logs']} "
-                    f"raised={batch_res['raised']!r} vectors={batch_res['vectors']}",
-                    f"vector_dim={batch_res['vector_dim']} expected_dim={settings.EMBEDDING_DIM}",
-                ))
+                    def _handler(_loop: Any, context: Dict[str, Any]) -> None:
+                        msg = str(context.get("message", ""))
+                        if "never retrieved" in msg:
+                            unretrieved.append(msg)
+
+                    prev_handler = loop.get_exception_handler()
+                    loop.set_exception_handler(_handler)
+                    raised_exc: Optional[Exception] = None
+                    vectors: List[List[float]] = []
+                    t0 = loop.time()
+                    try:
+                        with patch.object(
+                            emb_module, "get_embeddings_client", return_value=_FakeClient(embedder)
+                        ), patch.object(
+                            emb_module.settings, "EMBEDDING_HEDGE_SECONDS", hedge
+                        ), patch.object(
+                            emb_module.settings, "EMBEDDING_TIMEOUT_SECONDS", budget
+                        ):
+                            try:
+                                vectors = await emb_module.embed_texts(
+                                    ["hello world"], timeout=budget
+                                )
+                            except Exception as exc:  # noqa: BLE001 - reported below
+                                raised_exc = exc
+                    finally:
+                        elapsed = loop.time() - t0
+                        emb_logger.removeHandler(counter)
+                        loop.set_exception_handler(prev_handler)
+                    return {
+                        "calls": embedder.calls,
+                        "raised": raised_exc,
+                        "vectors": len(vectors),
+                        "vector_dim": len(vectors[0]) if vectors else None,
+                        "elapsed": elapsed,
+                        "warnings": list(counter.messages),
+                        "unretrieved": unretrieved,
+                    }
+
+                if want("E15"):
+                    print("\n[E15] Hedged query embedding (unit, fake client)...")
+                    # (a) first call slow, second fast -> hedge result at about hedge + fast.
+                    hedge_a = await _run_hedge_case([0.30, 0.02], hedge=0.05, budget=1.0)
+                    hedge_a_warn = any("hedge" in m.lower() for m in hedge_a["warnings"])
+                    e15a_pass = (
+                        hedge_a["raised"] is None
+                        and hedge_a["calls"] == 2
+                        and hedge_a["vectors"] == 1
+                        and hedge_a["vector_dim"] == settings.EMBEDDING_DIM
+                        and 0.05 <= hedge_a["elapsed"] < 0.25
+                        and hedge_a_warn
+                    )
+                    # (b) both slow -> TimeoutError at the budget, no unretrieved-task warnings.
+                    hedge_b = await _run_hedge_case([0.5, 0.5], hedge=0.05, budget=0.15)
+                    e15b_hedge_pass = (
+                        isinstance(hedge_b["raised"], asyncio.TimeoutError)
+                        and hedge_b["calls"] == 2
+                        and hedge_b["vectors"] == 0
+                        and hedge_b["unretrieved"] == []
+                    )
+                    # (c) first call fast -> no second request started.
+                    hedge_c = await _run_hedge_case([0.01], hedge=0.05, budget=1.0)
+                    hedge_c_warn = any("hedge" in m.lower() for m in hedge_c["warnings"])
+                    e15c_pass = (
+                        hedge_c["raised"] is None
+                        and hedge_c["calls"] == 1
+                        and hedge_c["vectors"] == 1
+                        and hedge_c["vector_dim"] == settings.EMBEDDING_DIM
+                        and not hedge_c_warn
+                    )
+                    print(
+                        f"   (a) slow+fast second: calls={hedge_a['calls']} "
+                        f"elapsed={hedge_a['elapsed']:.3f}s hedge_warn={hedge_a_warn}"
+                    )
+                    print(
+                        f"   (b) both slow: raised={hedge_b['raised']!r} "
+                        f"elapsed={hedge_b['elapsed']:.3f}s "
+                        f"unretrieved={len(hedge_b['unretrieved'])}"
+                    )
+                    print(
+                        f"   (c) fast first: calls={hedge_c['calls']} "
+                        f"elapsed={hedge_c['elapsed']:.3f}s hedge_warn={hedge_c_warn}"
+                    )
+                    results.append(row(
+                        "E15",
+                        "Hedged query embedding: hedge fires, budget caps, fast path",
+                        "(a) slow then fast second -> result ~hedge+fast with hedge WARNING; "
+                        "(b) both slow -> TimeoutError at budget, no unretrieved tasks; "
+                        "(c) fast first -> single call",
+                        e15a_pass and e15b_hedge_pass and e15c_pass,
+                        f"(a)={'PASS' if e15a_pass else 'FAIL'} calls={hedge_a['calls']} "
+                        f"elapsed={hedge_a['elapsed']:.3f}s hedge_warn={hedge_a_warn}; "
+                        f"(b)={'PASS' if e15b_hedge_pass else 'FAIL'} raised={hedge_b['raised']!r} "
+                        f"unretrieved={len(hedge_b['unretrieved'])}; "
+                        f"(c)={'PASS' if e15c_pass else 'FAIL'} calls={hedge_c['calls']} "
+                        f"hedge_warn={hedge_c_warn}",
+                        f"vector_dim a={hedge_a['vector_dim']} c={hedge_c['vector_dim']} "
+                        f"expected={settings.EMBEDDING_DIM}",
+                    ))
+
+                if want("E15b"):
+                    print("\n[E15b] Batch embedding default timeout: retry then success...")
+                    batch_res = await _run_batch_case(
+                        "EMBEDDING_BATCH_TIMEOUT_SECONDS", ["alpha", "beta"], None
+                    )
+                    e15b_pass = (
+                        batch_res["raised"] is None
+                        and batch_res["attempts"] == 2
+                        and batch_res["retry_logs"] == 1
+                        and batch_res["vectors"] == 2
+                        and batch_res["vector_dim"] == settings.EMBEDDING_DIM
+                    )
+                    results.append(row(
+                        "E15b",
+                        "Batch embedding default timeout: retry then success",
+                        "no timeout arg -> EMBEDDING_BATCH_TIMEOUT_SECONDS; first times out, one retry logged",
+                        e15b_pass,
+                        f"attempts={batch_res['attempts']} retry_logs={batch_res['retry_logs']} "
+                        f"raised={batch_res['raised']!r} vectors={batch_res['vectors']}",
+                        f"vector_dim={batch_res['vector_dim']} expected_dim={settings.EMBEDDING_DIM}",
+                    ))
 
             # -----------------------------------------------------------------
             # FLAKE measurement (diagnostic only, no pass/fail threshold)
@@ -1390,9 +1499,12 @@ async def main() -> None:
                     demo_func_hits += int(mentions_fn)
                     print(
                         f"   run {i + 1}: time_to_reply={ttr:.4f} "
-                        f"memory_used_has_record={in_mem} reply_mentions_function={mentions_fn}"
+                        f"memory_used_has_record={in_mem} "
+                        f"retrieval_timed_out={reply.trace.retrieval_timed_out} "
+                        f"reply_mentions_function={mentions_fn}"
                     )
                 print(f"   memory_used contained record: {demo_mem_hits}/10")
+                print(f"   recall lost: {10 - demo_mem_hits}/10")
                 print(f"   reply mentions 'function':    {demo_func_hits}/10")
                 print(
                     f"   time_to_reply min={min(demo_ttrs):.4f} median={median(demo_ttrs):.4f} "
@@ -1548,6 +1660,7 @@ async def main() -> None:
                         )
                         collected_replies.append((f"LAT-{i + 1}", turn.reply))
                         t = turn.trace.timings
+                        mem_hit = any(m.record_id == rec.id for m in turn.memory_used)
                         run = {
                             "time_to_reply": t.get("time_to_reply", 0.0),
                             "embed": t.get("embed", 0.0),
@@ -1555,13 +1668,17 @@ async def main() -> None:
                             "judge": t.get("judge", 0.0),
                             "reply_generation": t.get("reply_generation", 0.0),
                             "retries": float(len(counter.messages)),
+                            "mem_hit": 1.0 if mem_hit else 0.0,
+                            "timed_out": 1.0 if turn.trace.retrieval_timed_out else 0.0,
                         }
                         lat_runs.append(run)
                         print(
                             f"   run {i + 1}: time_to_reply={run['time_to_reply']:.4f} "
                             f"embed={run['embed']:.4f} search={run['search']:.4f} "
                             f"judge={run['judge']:.4f} reply_generation={run['reply_generation']:.4f} "
-                            f"retries={int(run['retries'])}"
+                            f"retries={int(run['retries'])} "
+                            f"memory_used_has_record={mem_hit} "
+                            f"retrieval_timed_out={turn.trace.retrieval_timed_out}"
                         )
                 finally:
                     emb_logger.removeHandler(counter)
@@ -1570,6 +1687,8 @@ async def main() -> None:
                 print(
                     f"   time_to_reply min={min(ttrs):.4f} median={median(ttrs):.4f} max={max(ttrs):.4f}"
                 )
+                lat_recall_lost = sum(1 for r in lat_runs if r["mem_hit"] == 0.0)
+                print(f"   recall lost: {lat_recall_lost}/{len(lat_runs)}")
                 if LAT_BASELINE_LINES:
                     print("   BEFORE this change (router on the reply path):")
                     for line in LAT_BASELINE_LINES:

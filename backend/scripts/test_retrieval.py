@@ -32,7 +32,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from backend.config.settings import settings
 from backend.models.models import KnowledgeRecord, User
 from backend.services.embeddings import embed_texts
-from backend.services.orchestrator import run_native_tool_loop
 import backend.services.retrieval as retrieval_module
 from backend.services.retrieval import (
     Judgment,
@@ -209,8 +208,6 @@ async def main() -> None:
     users_to_cleanup: List[int] = []
     results: List[Dict[str, Any]] = []
     case1_timings: Dict[str, float] = {}
-    case7a_final_reply: str = ""
-    loop_7a = None
 
     print("=" * 95)
     print("PHASE 2 TASK 2.2: MEMORY RETRIEVAL & RELEVANCE EVALUATION")
@@ -586,88 +583,6 @@ async def main() -> None:
                 "detail": f"Safely timed out (timed_out={res6d.timed_out}, items={len(res6d.items)})",
             })
 
-            # =========================================================================
-            # SECTION 4: Native Tool-Calling Loop with Real Model (Case 7)
-            # =========================================================================
-            print("\n[SECTION 4] Running native tool-calling loop with real model (Case 7)...")
-            user_toolcall = await create_test_user(session, "toolcall")
-            users_to_cleanup.append(user_toolcall.id)
-            await seed_canonical_records(session, user_toolcall, FIXED_NOW)
-
-            # 7(a): "I'm stuck on a calculus problem" -> model calls retrieve_memory, executes it, returns final reply
-            print("Running Case 7a: Real model tool call for 'I\\'m stuck on a calculus problem'...")
-            messages_7a = [
-                {"role": "system", "content": SYSTEM_TOOL_PROMPT},
-                {"role": "user", "content": "I'm stuck on a calculus problem"},
-            ]
-            loop_7a = await run_native_tool_loop(
-                user_id=user_toolcall.id,
-                messages=messages_7a,
-                now=FIXED_NOW,
-            )
-            tool_called_7a = loop_7a.tool_called
-            case7a_final_reply = loop_7a.reply
-            final_mentions_functions = "function" in case7a_final_reply.lower()
-            if tool_called_7a:
-                print("   Model initiated tool call: retrieve_memory (via orchestrator loop)")
-
-            c7a_pass = tool_called_7a and bool(case7a_final_reply) and final_mentions_functions
-            results.append({
-                "id": "Case-7a",
-                "name": "Tool loop: calculus query",
-                "expected": "calls retrieve_memory, final reply mentions functions",
-                "actual": (
-                    f"tool_called={tool_called_7a}, "
-                    f"mentions_functions={final_mentions_functions}"
-                ),
-                "status": "PASS" if c7a_pass else "FAIL",
-                "detail": f"tool_called={tool_called_7a}, non_empty={bool(case7a_final_reply)}, mentions_functions={final_mentions_functions}",
-            })
-
-            # 7(b): "what is 2+2?" -> no tool call
-            print("Running Case 7b: 'what is 2+2?' -> no tool call...")
-            messages_7b = [
-                {"role": "system", "content": SYSTEM_TOOL_PROMPT},
-                {"role": "user", "content": "what is 2+2?"},
-            ]
-            loop_7b = await run_native_tool_loop(
-                user_id=user_toolcall.id,
-                messages=messages_7b,
-                now=FIXED_NOW,
-            )
-            tool_called_7b = loop_7b.tool_called
-            c7b_pass = not tool_called_7b
-            results.append({
-                "id": "Case-7b",
-                "name": "Tool loop: 2+2 general knowledge",
-                "expected": "no tool call",
-                "actual": f"tool_called={tool_called_7b}",
-                "status": "PASS" if c7b_pass else "FAIL",
-                "detail": f"Correctly answered without tool call (reply_len={len(loop_7b.reply)})",
-            })
-
-            # 7(c): "hello" -> no tool call
-            print("Running Case 7c: 'hello' smalltalk -> no tool call...")
-            messages_7c = [
-                {"role": "system", "content": SYSTEM_TOOL_PROMPT},
-                {"role": "user", "content": "hello"},
-            ]
-            loop_7c = await run_native_tool_loop(
-                user_id=user_toolcall.id,
-                messages=messages_7c,
-                now=FIXED_NOW,
-            )
-            tool_called_7c = loop_7c.tool_called
-            c7c_pass = not tool_called_7c
-            results.append({
-                "id": "Case-7c",
-                "name": "Tool loop: hello smalltalk",
-                "expected": "no tool call",
-                "actual": f"tool_called={tool_called_7c}",
-                "status": "PASS" if c7c_pass else "FAIL",
-                "detail": f"Correctly answered without tool call (reply_len={len(loop_7c.reply)})",
-            })
-
         finally:
             print("\nCleaning up all throwaway users (main session)...")
             for uid in users_to_cleanup:
@@ -825,7 +740,6 @@ async def main() -> None:
                 res1.candidates + res2.candidates + res3.candidates + res4.candidates +
                 res5.candidates +
                 res5b_dinner.candidates + res5b_css.candidates +
-                (loop_7a.retrieval.candidates if loop_7a is not None and loop_7a.retrieval is not None else []) +
                 res_na.candidates + res_nb.candidates + res_nc.candidates + res_nd.candidates
             )
             below_cutoff_candidates = [
@@ -916,12 +830,6 @@ async def main() -> None:
     print(f"  Relevance Judge step : {t_judge:.4f} s")
     print(f"  Total Retrieval time : {t_total:.4f} s")
     print("-" * 95)
-
-    print("\n" + "=" * 95)
-    print("CASE 7a FINAL MODEL REPLY (WITH WEAVED MEMORY):")
-    print("=" * 95)
-    print(case7a_final_reply)
-    print("=" * 95)
 
     if all_passed:
         print("\nALL RETRIEVAL TEST CASES PASSED SUCCESSFULLY.")

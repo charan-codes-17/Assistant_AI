@@ -13,13 +13,15 @@ Guarantees:
 - confirm_task_candidate persists an extraction CandidateTask (ownership-scoped, idempotent).
 """
 
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import logging
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.database import AsyncSessionLocal
 from backend.models.models import KnowledgeRecord, Task, User
 from backend.services.embeddings import embed_texts
 from backend.services.extraction import CandidateTask, confirm_task
@@ -62,6 +64,55 @@ async def confirm_record(
     await session.commit()
     await session.refresh(rec)
     return rec
+
+
+@dataclass
+class BatchConfirmResult:
+    """Outcome of confirm_records: the rows confirmed, and the ids that were ignored."""
+
+    confirmed_records: List[KnowledgeRecord] = field(default_factory=list)
+    ignored_ids: List[int] = field(default_factory=list)
+
+
+async def confirm_records(
+    user_id: int,
+    ids: Sequence[int],
+) -> BatchConfirmResult:
+    """Confirm several pending memory records the user owns, in one transaction.
+
+    - Ownership-scoped: ids that do not exist or are owned by another user are ignored and
+      returned in BatchConfirmResult.ignored_ids (never confirmed, never mutated).
+    - Rejected records are ignored and reported too.
+    - Idempotent: already-confirmed owned records are returned unchanged (no duplicate writes).
+    - Opens its own short-lived session/transaction, so it never holds a caller's session.
+    """
+    result = BatchConfirmResult()
+    unique_ids: List[int] = list(dict.fromkeys(ids))
+    if not unique_ids:
+        return result
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(KnowledgeRecord).where(
+            KnowledgeRecord.id.in_(unique_ids),
+            KnowledgeRecord.user_id == user_id,
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        by_id = {rec.id: rec for rec in rows}
+
+        for record_id in unique_ids:
+            rec = by_id.get(record_id)
+            if rec is None or rec.status == "rejected":
+                result.ignored_ids.append(record_id)
+                continue
+            if rec.status != "confirmed":
+                rec.status = "confirmed"
+            result.confirmed_records.append(rec)
+
+        await session.commit()
+        for rec in result.confirmed_records:
+            await session.refresh(rec)
+
+    return result
 
 
 async def reject_record(
@@ -352,7 +403,9 @@ async def set_quiet_mode(
 
 __all__ = [
     "NotFoundError",
+    "BatchConfirmResult",
     "confirm_record",
+    "confirm_records",
     "reject_record",
     "edit_record",
     "delete_record",

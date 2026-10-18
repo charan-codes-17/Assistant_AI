@@ -33,11 +33,19 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = Field(description="Embedding model ID")
     EMBEDDING_DIM: int = Field(description="Vector dimension of EMBEDDING_MODEL")
     EMBEDDING_TIMEOUT_SECONDS: float = Field(
-        default=4.0,
+        default=5.0,
         description=(
-            "Per-attempt wall-clock timeout for the query embedding call in retrieval. One "
-            "retry is attempted, so the total embedding budget is EMBEDDING_TIMEOUT_SECONDS * 2; "
-            "after that the existing retrieval fail-open applies."
+            "Total wall-clock budget for the query embedding call in retrieval. The query path "
+            "hedges: one request, plus a second identical request if the first is slow after "
+            "EMBEDDING_HEDGE_SECONDS; whichever finishes first wins. When the budget is exhausted "
+            "the existing retrieval fail-open applies."
+        ),
+    )
+    EMBEDDING_HEDGE_SECONDS: float = Field(
+        default=1.5,
+        description=(
+            "Seconds with no query-embedding result before the hedge fires a second identical "
+            "request concurrently (query path only). Must be below EMBEDDING_TIMEOUT_SECONDS."
         ),
     )
     EMBEDDING_BATCH_TIMEOUT_SECONDS: float = Field(
@@ -47,6 +55,23 @@ class Settings(BaseSettings):
             "extraction dedupe and edit_record. One retry is attempted, so the total budget is "
             "EMBEDDING_BATCH_TIMEOUT_SECONDS * 2. This is the default when embed_texts is called "
             "without an explicit timeout."
+        ),
+    )
+
+    # Onboarding (PRD FR17 / FR18)
+    ONBOARDING_MAX_CHARS: int = Field(
+        default=12000,
+        description=(
+            "Max characters accepted for an onboarding payload: the pasted import text, or the "
+            "combined questionnaire transcript (each answer is capped at 1000 chars first). Larger "
+            "input is rejected with an error and nothing is staged; input is never truncated silently."
+        ),
+    )
+    ONBOARDING_MAX_CANDIDATES: int = Field(
+        default=40,
+        description=(
+            "Max candidate records staged from a single onboarding parse. Valid items beyond this "
+            "count are dropped and counted in OnboardingResult.dropped.over_cap."
         ),
     )
 

@@ -41,6 +41,7 @@ from backend.services.actions import (
     NotFoundError,
     apply_directive,
     confirm_record,
+    confirm_records,
     confirm_task,
     confirm_task_candidate,
     delete_record,
@@ -549,6 +550,93 @@ async def main() -> None:
                 "actual": f"A_ids=({task_11_a.id},{task_11_a_again.id}) count={len(a_count)} B_id={task_11_b.id}",
                 "status": "PASS" if t11_pass else "FAIL",
                 "detail": "A double-confirm is one task; B gets a separate owned row, A's row unchanged",
+            })
+
+            # -----------------------------------------------------------------
+            # Test 12: confirm_records batch confirm (ownership-scoped + idempotent)
+            # -----------------------------------------------------------------
+            text_12_a1 = "User batch fact one about algorithms"
+            text_12_a2 = "User batch fact two about hiking"
+            text_12_b1 = "User B batch fact about music"
+            vecs_12 = await embed_texts([text_12_a1, text_12_a2, text_12_b1])
+            rec_12_a1 = KnowledgeRecord(
+                user_id=user_a.id, kind="knowledge", content=text_12_a1,
+                status="pending", embedding=vecs_12[0],
+            )
+            rec_12_a2 = KnowledgeRecord(
+                user_id=user_a.id, kind="knowledge", content=text_12_a2,
+                status="pending", embedding=vecs_12[1],
+            )
+            rec_12_b1 = KnowledgeRecord(
+                user_id=user_b.id, kind="knowledge", content=text_12_b1,
+                status="pending", embedding=vecs_12[2],
+            )
+            session.add_all([rec_12_a1, rec_12_a2, rec_12_b1])
+            await session.commit()
+            await session.refresh(rec_12_a1)
+            await session.refresh(rec_12_a2)
+            await session.refresh(rec_12_b1)
+            id_12_a1 = rec_12_a1.id
+            id_12_a2 = rec_12_a2.id
+            id_12_b1 = rec_12_b1.id
+
+            missing_id_12 = 999999999
+            batch_12 = await confirm_records(
+                user_a.id,
+                [id_12_a1, id_12_a2, id_12_b1, missing_id_12],
+            )
+            confirmed_12 = sorted(r.id for r in batch_12.confirmed_records)
+            ignored_12 = sorted(batch_12.ignored_ids)
+
+            # Second (idempotent) call on the same owned ids
+            batch_12_again = await confirm_records(user_a.id, [id_12_a1, id_12_a2])
+            confirmed_12_again = sorted(r.id for r in batch_12_again.confirmed_records)
+
+            # Refresh from DB (confirm_records used its own session/connection).
+            # Capture plain ids before expiring: accessing an expired ORM attribute
+            # outside a greenlet context raises MissingGreenlet.
+            id_user_a = user_a.id
+            session.expire_all()
+            rec_12_a1_db = await session.get(KnowledgeRecord, id_12_a1)
+            rec_12_a2_db = await session.get(KnowledgeRecord, id_12_a2)
+            rec_12_b1_db = await session.get(KnowledgeRecord, id_12_b1)
+            count_a1 = (
+                await session.execute(
+                    select(KnowledgeRecord).where(KnowledgeRecord.id == id_12_a1)
+                )
+            ).scalars().all()
+
+            visible_12_a1 = any(
+                r.id == id_12_a1
+                for r, _ in await search_confirmed(session, id_user_a, vecs_12[0], k=5)
+            )
+            visible_12_b1_for_a = any(
+                r.id == id_12_b1
+                for r, _ in await search_confirmed(session, id_user_a, vecs_12[2], k=5)
+            )
+
+            t12_pass = (
+                confirmed_12 == sorted([id_12_a1, id_12_a2])
+                and ignored_12 == sorted([id_12_b1, missing_id_12])
+                and confirmed_12_again == sorted([id_12_a1, id_12_a2])
+                and rec_12_a1_db.status == "confirmed"
+                and rec_12_a2_db.status == "confirmed"
+                and rec_12_b1_db.status == "pending"
+                and len(count_a1) == 1
+                and visible_12_a1
+                and not visible_12_b1_for_a
+            )
+            results.append({
+                "id": "Test-12",
+                "name": "confirm_records batch confirm (ownership + idempotent)",
+                "expected": "A ids confirmed, B/missing ids ignored, 1 row per id, B id stays pending",
+                "actual": (
+                    f"confirmed={confirmed_12}, ignored={ignored_12}, "
+                    f"second_call={confirmed_12_again}, b1_status={rec_12_b1_db.status}, "
+                    f"a1_rows={len(count_a1)}, visible_a1={visible_12_a1}"
+                ),
+                "status": "PASS" if t12_pass else "FAIL",
+                "detail": "confirm_records confirms only owned ids in one transaction and is idempotent",
             })
 
         finally:
