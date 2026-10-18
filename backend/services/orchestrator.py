@@ -58,9 +58,7 @@ Be plain, direct, and concise. No emoji. No flattery. No filler openers such as 
 
 Format replies for a chat app: short (aim under 120 words unless the user asks for depth), plain text. No LaTeX or math markup. No markdown headings or tables. At most simple dash or numbered lists.
 
-Call the retrieve_memory tool whenever the user's message could depend on their own history, projects, preferences, prior statements, or anything they have told you before. That includes messages about something the user is learning, working on, or stuck on; questions such as "what did I say/decide/ask about X"; and any reference to the user's own notes, plans, or preferences. When in doubt and personal context could matter, call the tool: it is cheap and safe. At most one retrieve_memory call per turn.
-
-Do NOT call the tool for pure smalltalk (greetings, thanks, goodbyes) or for clearly general questions that do not depend on the user's personal history, for example "what is 2+2" or "what is the capital of France".
+Retrieval happens automatically before you reply: when relevant memories exist for the user's message they are given to you in a <memory> block. You do not call any tools. When a <memory> block is present and relevant, use it to shape the reply; when it is absent or clearly unrelated, just answer.
 
 When a <memory> block is provided it is context about THIS user and will usually be relevant: let it shape the reply by naming the specific topic, item, or fact it gives, instead of answering only in generic terms. Only ignore it when it is clearly unrelated to the request. Do not announce that you are consulting memory and never write "I remember" or "as I recall". State relevant facts plainly, for example "You were working on X".
 
@@ -127,7 +125,8 @@ class PendingRecord(BaseModel):
 
 class TraceInfo(BaseModel):
     timings: dict[str, float] = Field(default_factory=dict)
-    tool_called: bool = False
+    retrieval_ran: bool = False
+    candidates_considered: int = 0
     retrieval_timed_out: bool = False
     errors: list[str] = Field(default_factory=list)
     skipped: bool = False  # True when conversation intervention was skipped
@@ -173,6 +172,7 @@ class PostResult(BaseModel):
     intervention: InterventionDecision = Field(
         default_factory=lambda: InterventionDecision(action="none", reason="not run")
     )
+    extraction_failed: bool = False
     trace: TraceInfo = Field(default_factory=TraceInfo)
 
 
@@ -494,10 +494,10 @@ async def respond(
     """Produce the user-visible reply. Caller may send it before postprocess().
 
     The router does NOT run on the reply path. Commands (slash) and empty input are classified
-    in code and return immediately; for every other input the router LLM call is started as a
-    background asyncio task and the chat model is called straight away with the retrieve_memory
-    tool. postprocess() awaits the router task and resolves the final intent. ReplyResult.intent
-    is therefore None for non-commands at reply time.
+    in code and return immediately; for every other input retrieval runs deterministically in
+    code BEFORE a single tool-less chat call, and the router LLM call runs as a background
+    asyncio task. postprocess() awaits the router task and resolves the final intent.
+    ReplyResult.intent is therefore None for non-commands at reply time.
     """
     t_all = time.perf_counter()
     turn_id = str(uuid.uuid4())
@@ -533,34 +533,58 @@ async def respond(
         reply.trace.timings = timings
         return reply
 
-    history_msgs = clip_history(history)
-    user_msg = {"role": "user", "content": text[:HISTORY_MAX_CHARS]}
-    messages: list[dict[str, Any]] = (
-        [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
-        + history_msgs
-        + [user_msg]
-    )
-
     # Start the router off the reply path; postprocess() awaits it and resolves the intent.
     router_task: asyncio.Task[RouterResult] = asyncio.create_task(classify_turn(text))
     router_task.add_done_callback(_consume_router_exception)
     reply._router_task = router_task
 
-    # Go straight to the chat model with the retrieve_memory tool; the model itself decides
-    # whether the turn needs memory (it does not call the tool for pure smalltalk).
-    loop = await run_native_tool_loop(
-        user_id=user_id,
-        messages=messages,
-        now=ref_now,
-        timeout=settings.RETRIEVAL_TIMEOUT_SECONDS,
-    )
-    reply.reply = loop.reply.strip()
-    reply.memory_used = loop.memory_used
-    reply.retrieval = loop.retrieval
-    reply.trace.tool_called = loop.tool_called
-    reply.trace.retrieval_timed_out = loop.retrieval_timed_out
-    errors.extend(loop.errors)
-    timings.update(loop.timings)
+    # Retrieval runs deterministically in code for every non-command, non-empty turn, BEFORE
+    # the chat call. Same fail-open behaviour as the old tool loop: on timeout reply without
+    # memory and set retrieval_timed_out=True.
+    retrieval_timeout = settings.RETRIEVAL_TIMEOUT_SECONDS
+    t_ret = time.perf_counter()
+    try:
+        retrieval = await asyncio.wait_for(
+            _execute_retrieve(user_id, text, ref_now, retrieval_timeout),
+            timeout=retrieval_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "retrieve_memory timed out in respond for user_id=%s (limit=%.2fs)",
+            user_id,
+            retrieval_timeout,
+        )
+        retrieval = RetrievalResult(items=[], timed_out=True)
+    timings["retrieval"] = round(time.perf_counter() - t_ret, 4)
+    if retrieval.timings:
+        timings.update(retrieval.timings)
+    reply.retrieval = retrieval
+    reply.trace.retrieval_ran = True
+    reply.trace.retrieval_timed_out = bool(retrieval.timed_out)
+    reply.trace.candidates_considered = retrieval.candidates_considered
+    reply.memory_used = [] if retrieval.timed_out else items_from_retrieval(retrieval)
+
+    history_msgs = clip_history(history)
+    messages: list[dict[str, Any]] = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+    if reply.memory_used:
+        messages.append(
+            {"role": "system", "content": format_memory_block(reply.memory_used)}
+        )
+    messages += history_msgs
+    messages.append({"role": "user", "content": text[:HISTORY_MAX_CHARS]})
+
+    # ONE chat call, NO tools. Empty output (LLMEmptyResponse) falls back to FALLBACK_REPLY.
+    t_gen = time.perf_counter()
+    try:
+        msg = await chat(tier="fast", messages=messages, tools=None)
+        reply_text = str(msg).strip()
+    except LLMEmptyResponse:
+        reply_text = ""
+    if not reply_text:
+        logger.error("Empty chat reply in respond; returning fallback.")
+        reply_text = FALLBACK_REPLY
+    reply.reply = reply_text
+    timings["reply_generation"] = round(time.perf_counter() - t_gen, 4)
     timings["time_to_reply"] = round(time.perf_counter() - t_all, 4)
     reply.trace.timings = timings
     reply.trace.errors = errors
@@ -636,21 +660,29 @@ async def postprocess(
             post.trace.errors.append(f"intervention_skip_check: {exc}")
             skip_intervention = False
 
-        async def _extraction() -> StagedResult:
-            t0 = time.perf_counter()
+        async def _extraction_once() -> StagedResult:
             async with AsyncSessionLocal() as session:
                 user = await session.get(User, user_id)
                 if user is None:
                     raise RuntimeError(f"user_id={user_id} not found")
-                staged = await extract_and_stage(
+                return await extract_and_stage(
                     session,
                     user,
                     extraction_text,
                     source=reply_result.source,
                     now=ref_now,
                 )
-            post.trace.timings["extraction"] = round(time.perf_counter() - t0, 4)
-            return staged
+
+        async def _extraction() -> StagedResult:
+            t0 = time.perf_counter()
+            try:
+                try:
+                    return await _extraction_once()
+                except Exception as exc:
+                    logger.warning("Extraction failed (%s); retrying once.", exc)
+                    return await _extraction_once()
+            finally:
+                post.trace.timings["extraction"] = round(time.perf_counter() - t0, 4)
 
         async def _intervention() -> tuple[InterventionDecision, bool]:
             if skip_intervention:
@@ -705,8 +737,9 @@ async def postprocess(
         extract_out, intervene_out = gathered[0], gathered[1]
 
         if isinstance(extract_out, Exception):
-            logger.exception("Extraction failed in postprocess: %s", extract_out)
+            logger.exception("Extraction failed twice in postprocess: %s", extract_out)
             post.trace.errors.append(f"extraction: {extract_out}")
+            post.extraction_failed = True
         else:
             post.pending_records = [
                 PendingRecord(
@@ -826,7 +859,8 @@ async def handle_turn(
         intervention=post.intervention,
         trace=TraceInfo(
             timings=timings,
-            tool_called=reply.trace.tool_called,
+            retrieval_ran=reply.trace.retrieval_ran,
+            candidates_considered=reply.trace.candidates_considered,
             retrieval_timed_out=reply.trace.retrieval_timed_out,
             errors=errors,
             skipped=post.trace.skipped,

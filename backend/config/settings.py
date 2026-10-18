@@ -35,9 +35,18 @@ class Settings(BaseSettings):
     EMBEDDING_TIMEOUT_SECONDS: float = Field(
         default=4.0,
         description=(
-            "Per-attempt wall-clock timeout for the query embedding call. One retry is "
-            "attempted, so the total embedding budget is EMBEDDING_TIMEOUT_SECONDS * 2; "
+            "Per-attempt wall-clock timeout for the query embedding call in retrieval. One "
+            "retry is attempted, so the total embedding budget is EMBEDDING_TIMEOUT_SECONDS * 2; "
             "after that the existing retrieval fail-open applies."
+        ),
+    )
+    EMBEDDING_BATCH_TIMEOUT_SECONDS: float = Field(
+        default=20.0,
+        description=(
+            "Per-attempt wall-clock timeout for all non-query (batch) embedding calls, e.g. "
+            "extraction dedupe and edit_record. One retry is attempted, so the total budget is "
+            "EMBEDDING_BATCH_TIMEOUT_SECONDS * 2. This is the default when embed_texts is called "
+            "without an explicit timeout."
         ),
     )
 

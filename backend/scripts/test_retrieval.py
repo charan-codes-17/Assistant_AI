@@ -536,7 +536,9 @@ async def main() -> None:
 
             # 6(d): Timeout test with fake slow embedder
             print("Running Case 6d: Fake slow embedder timeout test...")
-            async def fake_slow_embed_texts(texts: List[str]) -> List[List[float]]:
+            async def fake_slow_embed_texts(
+                texts: List[str], timeout: Optional[float] = None
+            ) -> List[List[float]]:
                 await asyncio.sleep(0.3)
                 return [[0.0] * settings.EMBEDDING_DIM]
 

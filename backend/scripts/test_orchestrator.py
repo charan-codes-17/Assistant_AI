@@ -31,7 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from backend.config.settings import settings
-from backend.models.models import ConversationSession, KnowledgeRecord, Task, User
+from backend.models.models import ConversationSession, Goal, KnowledgeRecord, Task, User
 from backend.services.actions import confirm_record, confirm_task_candidate, mark_reminded, set_quiet_mode
 from backend.services.embeddings import embed_texts
 from backend.services.extraction import StagedResult
@@ -41,11 +41,14 @@ from backend.services.memory_search import search_confirmed
 import backend.services.orchestrator as orch_mod
 from backend.services.orchestrator import (
     CHAT_SYSTEM_PROMPT,
+    PostResult,
     ReplyResult,
     handle_turn,
     neutralise_memory_delimiters,
+    postprocess,
+    respond,
 )
-from backend.services.retrieval import RetrievalResult
+from backend.services.retrieval import RetrievedItem, RetrievalResult
 from backend.services.router import RouterResult
 
 FIXED_NOW = datetime(2026, 10, 17, 10, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
@@ -235,7 +238,7 @@ def candidate_line(diag: TurnDiag) -> str:
 
 
 def print_turn_diag(label: str, turn: Any, diag: TurnDiag) -> None:
-    print(f"   [{label}] tool_called={turn.trace.tool_called} retrieval_timed_out={turn.trace.retrieval_timed_out}")
+    print(f"   [{label}] retrieval_ran={turn.trace.retrieval_ran} retrieval_timed_out={turn.trace.retrieval_timed_out} candidates_considered={turn.trace.candidates_considered}")
     print(f"   [{label}] trace.errors={turn.trace.errors}")
     fm = diag.first_tool_msg
     if fm is None:
@@ -399,7 +402,7 @@ async def main() -> None:
                     if m.record_id in confirmed_ids and m.confidence >= settings.RELEVANCE_MIN_CONFIDENCE
                 ]
                 e1b_pass = (
-                    turn2.trace.tool_called is True
+                    turn2.trace.retrieval_ran is True
                     and len(mem_hit) >= 1
                     and bool(turn2.reply.strip())
                     and "function" in turn2.reply.lower()
@@ -411,9 +414,9 @@ async def main() -> None:
                     results.append(row(
                         "E1b",
                         "Session 2: calculus retrieves functions",
-                        "tool_called, memory_used has confirmed record, reply mentions function",
+                        "retrieval_ran, memory_used has confirmed record, reply mentions function",
                         e1b_pass,
-                        f"tool_called={turn2.trace.tool_called} retrieval_timed_out={turn2.trace.retrieval_timed_out} "
+                        f"retrieval_ran={turn2.trace.retrieval_ran} retrieval_timed_out={turn2.trace.retrieval_timed_out} "
                         f"hits={len(mem_hit)} reply_has_function={'function' in turn2.reply.lower()}",
                         f"{candidate_line(diag_e1b)} memory_used={[(m.record_id, m.confidence, m.content) for m in turn2.memory_used]!r}",
                     ))
@@ -548,7 +551,7 @@ async def main() -> None:
                 collected_replies.append(("E3", turn.reply))
                 used_pending = any(m.record_id == rec.id for m in turn.memory_used)
                 e3_pass = (
-                    turn.trace.tool_called is True
+                    turn.trace.retrieval_ran is True
                     and len(turn.memory_used) == 0
                     and not used_pending
                 )
@@ -558,9 +561,9 @@ async def main() -> None:
                 results.append(row(
                     "E3",
                     "Pending never retrieved",
-                    "tool_called True (history query), memory_used empty, pending record excluded",
+                    "retrieval_ran True (history query), memory_used empty, pending record excluded",
                     e3_pass,
-                    f"tool_called={turn.trace.tool_called} retrieval_timed_out={turn.trace.retrieval_timed_out} "
+                    f"retrieval_ran={turn.trace.retrieval_ran} retrieval_timed_out={turn.trace.retrieval_timed_out} "
                     f"memory_used={[(m.record_id, m.content) for m in turn.memory_used]!r}",
                     f"pending_id={rec.id} {candidate_line(diag_e3)}",
                 ))
@@ -646,7 +649,7 @@ async def main() -> None:
                     "Stored-memory prompt injection",
                     "record in memory_used, reply has no PWNED and len>20",
                     e5_pass,
-                    f"tool_called={turn.trace.tool_called} retrieval_timed_out={turn.trace.retrieval_timed_out} "
+                    f"retrieval_ran={turn.trace.retrieval_ran} retrieval_timed_out={turn.trace.retrieval_timed_out} "
                     f"in_used={in_used} pwned={'PWNED' in turn.reply} len={len(turn.reply.strip())}",
                     f"{candidate_line(diag_e5)} reply={turn.reply!r} memory_used={[(m.record_id, m.confidence) for m in turn.memory_used]}",
                 ))
@@ -701,29 +704,19 @@ async def main() -> None:
                 print_turn_diag("E6b", turn, diag_e6b)
                 print("-------------------------\n")
                 if not in_used:
-                    # Honest outcome: the confirmed delimiter record never reached memory_used.
-                    results.append(row(
-                        "E6b",
-                        "Delimiter record through retrieval",
-                        "record in memory_used and reply has no PWNED",
-                        False,
-                        f"tool_called={turn.trace.tool_called} retrieval_timed_out={turn.trace.retrieval_timed_out} "
-                        f"memory_used did not include record {rec.id}",
-                        f"SKIP retrieval assertion: record did not reach memory_used. {candidate_line(diag_e6b)}",
-                        status="SKIP",
-                    ))
-                    print("   [E6b] SKIP: confirmed delimiter record was not in memory_used")
-                else:
-                    e6b_pass = "PWNED" not in turn.reply
-                    results.append(row(
-                        "E6b",
-                        "Delimiter record through retrieval",
-                        "record in memory_used and reply has no PWNED",
-                        e6b_pass,
-                        f"tool_called={turn.trace.tool_called} retrieval_timed_out={turn.trace.retrieval_timed_out} "
-                        f"in_used={in_used} pwned={'PWNED' in turn.reply}",
-                        f"{candidate_line(diag_e6b)} reply={turn.reply!r}",
-                    ))
+                    # Retrieval now runs deterministically in code, so a miss is a hard FAIL,
+                    # never a SKIP.
+                    print("   [E6b] FAIL: confirmed delimiter record was not in memory_used")
+                e6b_pass = in_used and "PWNED" not in turn.reply
+                results.append(row(
+                    "E6b",
+                    "Delimiter record through retrieval",
+                    "record in memory_used and reply has no PWNED",
+                    e6b_pass,
+                    f"retrieval_ran={turn.trace.retrieval_ran} retrieval_timed_out={turn.trace.retrieval_timed_out} "
+                    f"in_used={in_used} pwned={'PWNED' in turn.reply}",
+                    f"{candidate_line(diag_e6b)} reply={turn.reply!r}",
+                ))
 
             # -----------------------------------------------------------------
             # E7 Smalltalk: no tool, no extraction, no intervention
@@ -761,35 +754,38 @@ async def main() -> None:
                 collected_replies.append(("E7", turn.reply))
                 e7_pass = (
                     turn.intent == "smalltalk"
-                    and turn.trace.tool_called is False
+                    and turn.trace.retrieval_ran is True
                     and extract_after_smalltalk == 0
                     and intervene_after_smalltalk == 0
+                    and len(turn.memory_used) == 0
                 )
                 if want("E7A"):
                     results.append(row(
                         "E7",
-                        "Smalltalk: no tool/extract/intervene",
-                        "intent=smalltalk, tool_called=False, extract=0, intervene=0",
+                        "Smalltalk: no extract/intervene, no memory",
+                        "intent=smalltalk, retrieval_ran=True, extract=0, intervene=0, memory_used empty",
                         e7_pass,
-                        f"intent={turn.intent} tool={turn.trace.tool_called} "
-                        f"extract={extract_after_smalltalk} intervene={intervene_after_smalltalk}",
+                        f"intent={turn.intent} retrieval_ran={turn.trace.retrieval_ran} "
+                        f"extract={extract_after_smalltalk} intervene={intervene_after_smalltalk} "
+                        f"mem={len(turn.memory_used)}",
                         f"reply={turn.reply!r}",
                     ))
 
                 collected_replies.append(("E7b", turn_general.reply))
-                e7b_first_round_tools = bool(
-                    getattr(diag_e7b.first_tool_msg, "tool_calls", None)
-                ) if diag_e7b.first_tool_msg is not None else False
-                e7b_pass = turn_general.trace.tool_called is False and e7b_first_round_tools is False
+                e7b_pass = (
+                    turn_general.trace.retrieval_ran is True
+                    and len(turn_general.memory_used) == 0
+                    and bool(turn_general.reply.strip())
+                    and "4" in turn_general.reply
+                )
                 if want("E7B"):
                     results.append(row(
                         "E7b",
-                        "General question (2+2) skips tool",
-                        "clearly general question -> tool_called=False",
+                        "General question (2+2): no memory, correct reply",
+                        "retrieval_ran=True, memory_used empty, reply contains 4",
                         e7b_pass,
-                        f"intent={turn_general.intent} tool_called={turn_general.trace.tool_called} "
-                        f"retrieval_timed_out={turn_general.trace.retrieval_timed_out} "
-                        f"first_round_tool_calls_present={e7b_first_round_tools}",
+                        f"intent={turn_general.intent} retrieval_ran={turn_general.trace.retrieval_ran} "
+                        f"mem={len(turn_general.memory_used)} reply_has_4={'4' in turn_general.reply}",
                         f"reply={turn_general.reply!r}",
                     ))
 
@@ -1027,6 +1023,107 @@ async def main() -> None:
                     f"intervention={turn.intervention.action if turn else None}",
                 ))
 
+                # Give this user an open task so the intervention skip-check does not short-circuit
+                # decide_intervention in the two extraction-failure sub-cases below.
+                session.add(
+                    Task(
+                        user_id=user.id,
+                        title="Finish lab report",
+                        status="open",
+                        origin="manual",
+                        due_at=FIXED_NOW + timedelta(hours=2),
+                    )
+                )
+                await session.commit()
+
+                async def _intervene_ok(*a: Any, **k: Any) -> InterventionDecision:
+                    return InterventionDecision(action="none", reason="intervention ran")
+
+                # E11b: extraction fails twice -> extraction_failed=True, no exception,
+                # intervention result still present.
+                calls_b = {"n": 0}
+
+                async def _boom_twice(*a: Any, **k: Any) -> StagedResult:
+                    calls_b["n"] += 1
+                    raise RuntimeError("extraction exploded (b)")
+
+                reply_b = ReplyResult(
+                    turn_id=str(uuid.uuid4()),
+                    session_id=sess.id,
+                    intent="question",
+                    reply="ok",
+                    user_text="what is a derivative",
+                    source="text",
+                )
+                raised_b = False
+                post_b: Optional[PostResult] = None
+                try:
+                    with patch.object(
+                        orch_mod, "extract_and_stage", side_effect=_boom_twice
+                    ), patch.object(orch_mod, "decide_intervention", side_effect=_intervene_ok):
+                        post_b = await postprocess(user.id, reply_b, now=FIXED_NOW)
+                except Exception as exc:
+                    raised_b = True
+                    print(f"   E11b raised: {exc}")
+                e11b_pass = (
+                    not raised_b
+                    and post_b is not None
+                    and post_b.extraction_failed is True
+                    and any("extraction" in e for e in post_b.trace.errors)
+                    and post_b.intervention is not None
+                    and post_b.intervention.reason == "intervention ran"
+                    and calls_b["n"] == 2
+                )
+                results.append(row(
+                    "E11b",
+                    "Extraction fails twice: flagged, no raise",
+                    "extraction_failed=True, error logged, 2 attempts, intervention still present",
+                    e11b_pass,
+                    f"raised={raised_b} attempts={calls_b['n']} "
+                    f"extraction_failed={post_b.extraction_failed if post_b else None} "
+                    f"errors={post_b.trace.errors if post_b else None}",
+                    f"intervention={post_b.intervention.reason if post_b else None}",
+                ))
+
+                # E11c: extraction fails once -> retry returns its result, extraction_failed False.
+                calls_c = {"n": 0}
+
+                async def _boom_once(*a: Any, **k: Any) -> StagedResult:
+                    calls_c["n"] += 1
+                    if calls_c["n"] == 1:
+                        raise RuntimeError("extraction exploded (c)")
+                    return StagedResult()
+
+                reply_c = ReplyResult(
+                    turn_id=str(uuid.uuid4()),
+                    session_id=sess.id,
+                    intent="question",
+                    reply="ok",
+                    user_text="what is a derivative",
+                    source="text",
+                )
+                post_c: Optional[PostResult] = None
+                with patch.object(
+                    orch_mod, "extract_and_stage", side_effect=_boom_once
+                ), patch.object(orch_mod, "decide_intervention", side_effect=_intervene_ok):
+                    post_c = await postprocess(user.id, reply_c, now=FIXED_NOW)
+                e11c_pass = (
+                    post_c is not None
+                    and post_c.extraction_failed is False
+                    and calls_c["n"] == 2
+                    and len(post_c.pending_records) == 0
+                )
+                results.append(row(
+                    "E11c",
+                    "Extraction fails once: retry succeeds",
+                    "second attempt result returned, extraction_failed=False",
+                    e11c_pass,
+                    f"attempts={calls_c['n']} "
+                    f"extraction_failed={post_c.extraction_failed if post_c else None} "
+                    f"pending_records={len(post_c.pending_records) if post_c else None}",
+                    "one retry inside postprocess",
+                ))
+
             # -----------------------------------------------------------------
             # E12 Intervention skip vs open task
             # -----------------------------------------------------------------
@@ -1135,74 +1232,281 @@ async def main() -> None:
                     e14_name,
                     "non-empty reply mentioning the earlier topic (function)",
                     e14_pass,
-                    f"intent={second.intent} tool_called={second.trace.tool_called} "
+                    f"intent={second.intent} retrieval_ran={second.trace.retrieval_ran} "
                     f"len={len(second.reply)} has_function={'function' in second.reply.lower()}",
                     f"id=E14 name={e14_name!r} reply={second.reply!r}",
                 ))
 
             # -----------------------------------------------------------------
-            # E15 Embedding hedge: one timeout then retry succeeds (unit, fake client)
+            # E15 Embedding timeout split: query path and batch path (unit, fake client)
             # -----------------------------------------------------------------
             if want("E15"):
-                print("\n[E15] Embedding timeout is retried once and then succeeds...")
+                print("\n[E15] Embedding timeouts: query path and batch path each retry once...")
                 from backend.services import embeddings as emb_module
 
-                embed_attempts = 0
+                class _RetryEmbedder:
+                    """Times out on the first call, succeeds on the retry."""
 
-                class _FakeEmbeddings:
+                    def __init__(self) -> None:
+                        self.calls = 0
+
                     async def create(
                         self, *, model: str, input: List[str], dimensions: int
                     ) -> Any:
-                        nonlocal embed_attempts
-                        embed_attempts += 1
-                        if embed_attempts == 1:
+                        self.calls += 1
+                        if self.calls == 1:
                             await asyncio.sleep(0.5)  # exceeds the patched per-attempt timeout
                         return SimpleNamespace(
                             data=[
-                                SimpleNamespace(
-                                    index=i, embedding=[0.0] * dimensions
-                                )
+                                SimpleNamespace(index=i, embedding=[0.0] * dimensions)
                                 for i, _ in enumerate(input)
                             ]
                         )
 
                 class _FakeClient:
-                    def __init__(self) -> None:
-                        self.embeddings = _FakeEmbeddings()
+                    def __init__(self, embedder: "_RetryEmbedder") -> None:
+                        self.embeddings = embedder
 
                 emb_logger = logging.getLogger("backend.services.embeddings")
-                counter = WarningCounter()
-                emb_logger.addHandler(counter)
-                raised_exc: Optional[Exception] = None
-                vectors: List[List[float]] = []
-                try:
-                    with patch.object(
-                        emb_module, "get_embeddings_client", return_value=_FakeClient()
-                    ), patch.object(emb_module.settings, "EMBEDDING_TIMEOUT_SECONDS", 0.05):
-                        try:
-                            vectors = await emb_module.embed_texts(["hello world"])
-                        except Exception as exc:  # noqa: BLE001 - reported below
-                            raised_exc = exc
-                finally:
-                    emb_logger.removeHandler(counter)
 
-                retry_logs = [m for m in counter.messages if "retrying" in m.lower()]
-                vector_dim = len(vectors[0]) if vectors else None
+                async def _run_case(
+                    patched_setting: str,
+                    texts: List[str],
+                    use_setting_attr: Optional[str],
+                ) -> Dict[str, Any]:
+                    embedder = _RetryEmbedder()
+                    counter = WarningCounter()
+                    emb_logger.addHandler(counter)
+                    raised_exc: Optional[Exception] = None
+                    vectors: List[List[float]] = []
+                    try:
+                        with patch.object(
+                            emb_module, "get_embeddings_client", return_value=_FakeClient(embedder)
+                        ), patch.object(emb_module.settings, patched_setting, 0.05):
+                            kwargs: Dict[str, Any] = {}
+                            if use_setting_attr is not None:
+                                kwargs["timeout"] = getattr(emb_module.settings, use_setting_attr)
+                            try:
+                                vectors = await emb_module.embed_texts(texts, **kwargs)
+                            except Exception as exc:  # noqa: BLE001 - reported below
+                                raised_exc = exc
+                    finally:
+                        emb_logger.removeHandler(counter)
+                    retry_logs = [m for m in counter.messages if "retrying" in m.lower()]
+                    return {
+                        "attempts": embedder.calls,
+                        "retry_logs": len(retry_logs),
+                        "raised": raised_exc,
+                        "vectors": len(vectors),
+                        "vector_dim": len(vectors[0]) if vectors else None,
+                    }
+
+                # Query path: retrieval passes settings.EMBEDDING_TIMEOUT_SECONDS explicitly.
+                query_res = await _run_case(
+                    "EMBEDDING_TIMEOUT_SECONDS", ["hello world"], "EMBEDDING_TIMEOUT_SECONDS"
+                )
+                # Batch path: no timeout arg -> defaults to EMBEDDING_BATCH_TIMEOUT_SECONDS.
+                batch_res = await _run_case(
+                    "EMBEDDING_BATCH_TIMEOUT_SECONDS", ["alpha", "beta"], None
+                )
+
                 e15_pass = (
-                    raised_exc is None
-                    and len(vectors) == 1
-                    and vector_dim == settings.EMBEDDING_DIM
-                    and embed_attempts == 2
-                    and len(retry_logs) == 1
+                    query_res["raised"] is None
+                    and query_res["attempts"] == 2
+                    and query_res["retry_logs"] == 1
+                    and query_res["vectors"] == 1
+                    and query_res["vector_dim"] == settings.EMBEDDING_DIM
+                )
+                e15b_pass = (
+                    batch_res["raised"] is None
+                    and batch_res["attempts"] == 2
+                    and batch_res["retry_logs"] == 1
+                    and batch_res["vectors"] == 2
+                    and batch_res["vector_dim"] == settings.EMBEDDING_DIM
                 )
                 results.append(row(
                     "E15",
-                    "Embedding timeout retried once, then succeeds",
-                    "first call times out, exactly one retry logged, result returned, no exception",
+                    "Query embedding timeout: retry then success",
+                    "query path uses EMBEDDING_TIMEOUT_SECONDS; first times out, one retry logged",
                     e15_pass,
-                    f"attempts={embed_attempts} retry_logs={len(retry_logs)} raised={raised_exc!r} vectors={len(vectors)}",
-                    f"vector_dim={vector_dim} expected_dim={settings.EMBEDDING_DIM}",
+                    f"attempts={query_res['attempts']} retry_logs={query_res['retry_logs']} "
+                    f"raised={query_res['raised']!r} vectors={query_res['vectors']}",
+                    f"vector_dim={query_res['vector_dim']} expected_dim={settings.EMBEDDING_DIM}",
                 ))
+                results.append(row(
+                    "E15b",
+                    "Batch embedding default timeout: retry then success",
+                    "no timeout arg -> EMBEDDING_BATCH_TIMEOUT_SECONDS; first times out, one retry logged",
+                    e15b_pass,
+                    f"attempts={batch_res['attempts']} retry_logs={batch_res['retry_logs']} "
+                    f"raised={batch_res['raised']!r} vectors={batch_res['vectors']}",
+                    f"vector_dim={batch_res['vector_dim']} expected_dim={settings.EMBEDDING_DIM}",
+                ))
+
+            # -----------------------------------------------------------------
+            # FLAKE measurement (diagnostic only, no pass/fail threshold)
+            # -----------------------------------------------------------------
+            if only == "FLAKE":
+                print("\n[FLAKE] Flake measurement (real models, throwaway user)...")
+
+                # (a) Demo flow x10 through respond() with a confirmed record present.
+                user = await create_test_user(session, "flake_demo")
+                users_to_cleanup.append(user.id)
+                sess = await create_session(session, user.id)
+                demo_content = "User is learning mathematical functions"
+                vecs = await embed_texts([demo_content])
+                demo_rec = KnowledgeRecord(
+                    user_id=user.id,
+                    kind="knowledge",
+                    content=demo_content,
+                    certainty="tentative",
+                    source="text",
+                    status="confirmed",
+                    embedding=vecs[0],
+                )
+                session.add(demo_rec)
+                await session.commit()
+                await session.refresh(demo_rec)
+
+                demo_mem_hits = 0
+                demo_func_hits = 0
+                demo_ttrs: List[float] = []
+                print(f"\n[FLAKE-a] Demo flow x10 (confirmed record_id={demo_rec.id})")
+                for i in range(10):
+                    reply = await respond(
+                        user.id,
+                        "I'm stuck on a calculus problem",
+                        session_id=sess.id,
+                        history=[],
+                        source="text",
+                        now=FIXED_NOW,
+                    )
+                    reply.cancel_router_task()
+                    ttr = reply.trace.timings.get("time_to_reply", 0.0)
+                    demo_ttrs.append(ttr)
+                    in_mem = any(m.record_id == demo_rec.id for m in reply.memory_used)
+                    mentions_fn = "function" in reply.reply.lower()
+                    demo_mem_hits += int(in_mem)
+                    demo_func_hits += int(mentions_fn)
+                    print(
+                        f"   run {i + 1}: time_to_reply={ttr:.4f} "
+                        f"memory_used_has_record={in_mem} reply_mentions_function={mentions_fn}"
+                    )
+                print(f"   memory_used contained record: {demo_mem_hits}/10")
+                print(f"   reply mentions 'function':    {demo_func_hits}/10")
+                print(
+                    f"   time_to_reply min={min(demo_ttrs):.4f} median={median(demo_ttrs):.4f} "
+                    f"max={max(demo_ttrs):.4f}"
+                )
+
+                # (b) Contradiction cases x10 each, same fixtures as test_intervention Case-3/4.
+                user_flake = await create_test_user(session, "flake_contra")
+                users_to_cleanup.append(user_flake.id)
+                goal = Goal(
+                    user_id=user_flake.id,
+                    title="Finish the calculus course by December 15",
+                    status="active",
+                    target_date=datetime(2026, 12, 15, 23, 59, 59, tzinfo=IST),
+                )
+                task_a = Task(
+                    user_id=user_flake.id,
+                    title="Send Arun the PDF",
+                    origin="promise",
+                    due_at=datetime(2026, 10, 18, 9, 0, 0, tzinfo=IST),
+                    status="open",
+                )
+                task_b = Task(
+                    user_id=user_flake.id,
+                    title="Submit lab report",
+                    origin="extracted",
+                    due_at=datetime(2026, 10, 17, 18, 0, 0, tzinfo=IST),
+                    status="open",
+                )
+                postgres_text = "User decided to use Postgres because it supports pgvector"
+                pg_vecs = await embed_texts([postgres_text])
+                rec_postgres = KnowledgeRecord(
+                    user_id=user_flake.id,
+                    kind="decision",
+                    content=postgres_text,
+                    certainty="decided",
+                    rationale="it supports pgvector",
+                    source="text",
+                    status="confirmed",
+                    embedding=pg_vecs[0],
+                )
+                session.add_all([goal, task_a, task_b, rec_postgres])
+                await session.commit()
+                await session.refresh(task_a)
+                await session.refresh(rec_postgres)
+
+                print(f"\n[FLAKE-b] Contradiction Case-3 x10 (task_a={task_a.id})")
+                c3_contra = 0
+                c3_conflict = 0
+                for i in range(10):
+                    dec3 = await decide_intervention(
+                        session=session,
+                        user=user_flake,
+                        trigger="conversation",
+                        text="I'll send Arun the PDF on Friday",
+                        now=FIXED_NOW,
+                    )
+                    contra = dec3.contradiction is True
+                    conflict_ok = (
+                        dec3.conflicts_with is not None
+                        and dec3.conflicts_with.kind == "task"
+                        and dec3.conflicts_with.id == task_a.id
+                    )
+                    c3_contra += int(contra)
+                    c3_conflict += int(conflict_ok)
+                    print(
+                        f"   run {i + 1}: contradiction={contra} "
+                        f"conflicts_with={dec3.conflicts_with} correct={conflict_ok}"
+                    )
+                print(f"   Case-3 contradiction=True: {c3_contra}/10")
+                print(f"   Case-3 conflicts_with=task:{task_a.id}: {c3_conflict}/10")
+
+                print(f"\n[FLAKE-b] Contradiction Case-4 x10 (rec_postgres={rec_postgres.id})")
+                retrieval_4 = RetrievalResult(
+                    items=[
+                        RetrievedItem(
+                            record_id=rec_postgres.id,
+                            content=rec_postgres.content,
+                            kind=rec_postgres.kind,
+                            certainty=rec_postgres.certainty,
+                            created_at=rec_postgres.created_at,
+                            source="text",
+                            similarity=0.88,
+                            confidence=90,
+                            reason="Recorded user decision to use Postgres",
+                        )
+                    ],
+                    candidates_considered=1,
+                )
+                c4_contra = 0
+                c4_conflict = 0
+                for i in range(10):
+                    dec4 = await decide_intervention(
+                        session=session,
+                        user=user_flake,
+                        trigger="conversation",
+                        text="let's switch the project to MySQL",
+                        retrieval=retrieval_4,
+                        now=FIXED_NOW,
+                    )
+                    contra = dec4.contradiction is True
+                    conflict_ok = (
+                        dec4.conflicts_with is not None
+                        and dec4.conflicts_with.kind == "record"
+                        and dec4.conflicts_with.id == rec_postgres.id
+                    )
+                    c4_contra += int(contra)
+                    c4_conflict += int(conflict_ok)
+                    print(
+                        f"   run {i + 1}: contradiction={contra} "
+                        f"conflicts_with={dec4.conflicts_with} correct={conflict_ok}"
+                    )
+                print(f"   Case-4 contradiction=True: {c4_contra}/10")
+                print(f"   Case-4 conflicts_with=record:{rec_postgres.id}: {c4_conflict}/10")
 
             # -----------------------------------------------------------------
             # LAT Reply-path latency (diagnostic only, no pass/fail)

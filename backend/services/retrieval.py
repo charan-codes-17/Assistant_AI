@@ -176,7 +176,9 @@ async def retrieve_memory(
 
         # Step 1: Embed the query
         t_embed_start = time.perf_counter()
-        query_embeddings = await embed_texts([query])
+        query_embeddings = await embed_texts(
+            [query], timeout=settings.EMBEDDING_TIMEOUT_SECONDS
+        )
         if not query_embeddings:
             return RetrievalResult(
                 items=[],
