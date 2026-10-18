@@ -76,7 +76,22 @@ class Settings(BaseSettings):
     )
 
     # Telegram
+    # Optional at import: the API service must start without it. The bot worker
+    # checks it explicitly via settings.require("TELEGRAM_BOT_TOKEN") at startup.
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Dev or deployed bot token")
+
+    # Whisper STT (local, CPU int8). Model directory = WHISPER_MODEL_ROOT/whisper-<name>.
+    WHISPER_MODEL_NAME: str = Field(
+        default="small",
+        description="Whisper model size directory suffix: 'small' or 'base'.",
+    )
+    WHISPER_MODEL_ROOT: str = Field(
+        default="backend/whisper_models",
+        description=(
+            "Directory holding the baked Whisper model folders. Relative paths resolve "
+            "against the repo root locally; the container sets this to /app/whisper_models."
+        ),
+    )
 
     # Database
     DATABASE_URL: str = Field(description="PostgreSQL async connection string")
@@ -137,6 +152,14 @@ class Settings(BaseSettings):
         missing = [n for n in names if not getattr(self, n)]
         if missing:
             raise RuntimeError(f"Missing required settings in .env: {', '.join(missing)}")
+
+    @property
+    def whisper_model_dir(self) -> Path:
+        """Absolute path to the baked model folder: <root>/whisper-<name>."""
+        root = Path(self.WHISPER_MODEL_ROOT)
+        if not root.is_absolute():
+            root = ROOT_DIR / root
+        return root / f"whisper-{self.WHISPER_MODEL_NAME}"
 
 
 settings = Settings()

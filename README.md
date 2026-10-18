@@ -108,7 +108,75 @@ Visit [http://localhost:3000](http://localhost:3000).
 
 ---
 
-## 5. License
+## 5. Deploy (Railway container + hosted Postgres)
+
+The backend ships as a single container built from the repo-root `Dockerfile`
+(base image `python:3.12-slim`). `railway.toml` selects the Dockerfile builder and
+health-checks `GET /health`.
+
+### Build notes
+- The image installs dependencies from `backend/requirements.lock` (exact pinned versions).
+- The build **bakes both Whisper models** into the image at build time, into
+  `/app/whisper_models/whisper-small` and `/app/whisper_models/whisper-base` (plain
+  folders, no symlinks). This layer comes before the application code, so code changes
+  do not re-download the models. At runtime the app reads `WHISPER_MODEL_ROOT`.
+- The container runs as a non-root user. No secrets are baked into the image.
+
+### Start command
+The container's entrypoint is `backend/deploy/start_api.sh`, which runs migrations and
+then serves the API:
+
+```bash
+sh backend/deploy/start_api.sh
+# -> alembic upgrade head
+# -> exec uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8000}
+```
+
+`alembic upgrade head` must succeed first; if it fails the container exits non-zero.
+There is no `--reload`.
+
+### Environment variables for the API service (names only; set values in the platform)
+Required:
+- `APP_ENV` — must be `production` in the cloud.
+- `DATABASE_URL` — Postgres async connection string (hosted, with the `vector` extension).
+- `NEBIUS_API_KEY`
+- `CHAT_MODEL_FAST`
+- `CHAT_MODEL_REASONING`
+- `EMBEDDING_MODEL`
+- `EMBEDDING_DIM`
+
+Optional (sensible defaults exist):
+- `NEBIUS_BASE_URL`
+- `CHAT_MODEL_TOOLCALL`
+- `EMBEDDING_TIMEOUT_SECONDS`, `EMBEDDING_HEDGE_SECONDS`, `EMBEDDING_BATCH_TIMEOUT_SECONDS`
+- `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SIMILARITY`, `RELEVANCE_MIN_CONFIDENCE`,
+  `RETRIEVAL_TIMEOUT_SECONDS`
+- `DEDUPE_THRESHOLD`, `PENDING_DEDUPE_TTL_HOURS`
+- `ONBOARDING_MAX_CHARS`, `ONBOARDING_MAX_CANDIDATES`
+- `WHISPER_MODEL_NAME` (defaults to `small`; `base` is also baked)
+- `WHISPER_MODEL_ROOT` (the image sets this to `/app/whisper_models`)
+- `REMINDER_LEAD_MINUTES`, `INTERVENTION_TIMEOUT_SECONDS`
+
+`TELEGRAM_BOT_TOKEN` is **not** required by the API service (only the bot worker needs it).
+
+### Security notes
+- The development identity seam (`X-Dev-User-Id` header) only works when
+  `APP_ENV == "development"`. In production (`APP_ENV=production`) that header is
+  **rejected** (the request is treated as unauthenticated). The default `APP_ENV` is
+  `dev`, which also fails closed for the seam.
+- API docs (`/docs`) are only exposed in development.
+- CORS is disabled for the API.
+
+### Verifying a deploy (skeleton smoke test)
+`backend/scripts/deploy_smoke.py` runs the same checks locally and inside the container
+(runtime, required settings, DB latency, pgvector, migration head, embedding, chat, and
+one end-to-end orchestrator turn). It creates and removes a throwaway user and never
+prints secret values. `backend/scripts/whisper_probe.py --model small|base` measures
+Whisper load time, transcribe time and peak RSS against the baked models.
+
+---
+
+## 6. License
 
 This project is licensed under the terms of the [MIT License](LICENSE).
 

@@ -31,6 +31,7 @@ MANIFEST
 
 # Virtual environments
 venv/
+backend/venv312/
 .venv/
 env/
 ENV/

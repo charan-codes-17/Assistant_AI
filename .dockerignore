@@ -1,0 +1,46 @@
+# Never ship secrets, local venvs, caches, or non-API code into the image.
+.git
+.gitignore
+.cursorrules
+CLAUDE.md
+
+# Secrets
+.env
+.env.*
+*.env
+
+# Python caches / build artefacts
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+
+# Virtual environments (local only; the image installs from requirements.lock)
+**/venv
+**/venv312
+**/.venv
+**/env
+
+# Whisper models are baked at build time, never copied from the machine
+backend/whisper_models
+
+# Frontend / Node
+frontend
+node_modules
+**/.next
+
+# Logs and temp artefacts
+logs
+*.log
+*.ogg
+*.opus
+*.wav
+*.mp3
+*.m4a
+
+# Docs: keep README.md, drop the rest
+*.md
+!README.md
