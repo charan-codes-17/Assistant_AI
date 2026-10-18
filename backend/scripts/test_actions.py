@@ -42,6 +42,7 @@ from backend.services.actions import (
     apply_directive,
     confirm_record,
     confirm_task,
+    confirm_task_candidate,
     delete_record,
     edit_record,
     mark_reminded,
@@ -52,6 +53,7 @@ from backend.services.actions import (
     snooze_task,
     supersede_record,
 )
+from backend.services.extraction import CandidateTask
 from backend.services.embeddings import embed_texts
 import backend.services.intervention as intervention_module
 from backend.services.intervention import ActionDirective, decide_intervention
@@ -511,6 +513,42 @@ async def main() -> None:
                 "actual": f"has_old={has_old}, has_new={has_new}, superseded_by={rec_old.superseded_by}",
                 "status": "PASS" if t10_pass else "FAIL",
                 "detail": f"Old ID {rec_old.id} hidden; New ID {rec_new.id} confirmed and visible",
+            })
+
+            # -----------------------------------------------------------------
+            # Test 11: confirm_task_candidate ownership + idempotency
+            # -----------------------------------------------------------------
+            cand_11 = CandidateTask(
+                title="Send Arun the PDF",
+                due_at=FIXED_NOW + timedelta(minutes=5),
+                origin="promise",
+            )
+            task_11_a = await confirm_task_candidate(session, user_a, cand_11)
+            task_11_a_again = await confirm_task_candidate(session, user_a, cand_11)
+            a_count = (
+                await session.execute(
+                    select(Task).where(
+                        Task.user_id == user_a.id,
+                        Task.title == cand_11.title,
+                    )
+                )
+            ).scalars().all()
+            task_11_b = await confirm_task_candidate(session, user_b, cand_11)
+            await session.refresh(task_11_a)
+            t11_pass = (
+                task_11_a.id == task_11_a_again.id
+                and len(a_count) == 1
+                and task_11_b.id != task_11_a.id
+                and task_11_b.user_id == user_b.id
+                and task_11_a.user_id == user_a.id
+            )
+            results.append({
+                "id": "Test-11",
+                "name": "confirm_task_candidate idempotent + ownership",
+                "expected": "double confirm=1 row for A; B cannot take A's task",
+                "actual": f"A_ids=({task_11_a.id},{task_11_a_again.id}) count={len(a_count)} B_id={task_11_b.id}",
+                "status": "PASS" if t11_pass else "FAIL",
+                "detail": "A double-confirm is one task; B gets a separate owned row, A's row unchanged",
             })
 
         finally:

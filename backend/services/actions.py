@@ -10,6 +10,7 @@ Guarantees:
 - reschedule_task requires a timezone-aware datetime.
 - Each function commits its own database transaction.
 - Re-exports confirm_task from extraction.py.
+- confirm_task_candidate persists an extraction CandidateTask (ownership-scoped, idempotent).
 """
 
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.models import KnowledgeRecord, Task, User
 from backend.services.embeddings import embed_texts
-from backend.services.extraction import confirm_task
+from backend.services.extraction import CandidateTask, confirm_task
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,49 @@ async def supersede_record(
     await session.refresh(old_rec)
     await session.refresh(new_rec)
     return old_rec, new_rec
+
+
+def _due_at_equal(a: Optional[datetime], b: Optional[datetime]) -> bool:
+    """Compare due datetimes as absolute instants (None equals None)."""
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    a_cmp = a if a.tzinfo is not None else a.replace(tzinfo=timezone.utc)
+    b_cmp = b if b.tzinfo is not None else b.replace(tzinfo=timezone.utc)
+    return a_cmp.astimezone(timezone.utc) == b_cmp.astimezone(timezone.utc)
+
+
+async def confirm_task_candidate(
+    session: AsyncSession,
+    user: User,
+    candidate: CandidateTask,
+) -> Task:
+    """Persist a confirmed extraction task candidate for this user.
+
+    Ownership-scoped (always inserts/returns a row with user.id), own transaction,
+    idempotent on (user_id, title, due_at). Never returns or mutates another user's task.
+    """
+    stmt = select(Task).where(
+        Task.user_id == user.id,
+        Task.title == candidate.title,
+    )
+    existing_rows = (await session.execute(stmt)).scalars().all()
+    for row in existing_rows:
+        if _due_at_equal(row.due_at, candidate.due_at):
+            return row
+
+    task = Task(
+        user_id=user.id,
+        title=candidate.title,
+        due_at=candidate.due_at,
+        status="open",
+        origin=candidate.origin,
+    )
+    session.add(task)
+    await session.commit()
+    await session.refresh(task)
+    return task
 
 
 async def mark_task_done(
@@ -320,5 +364,6 @@ __all__ = [
     "apply_directive",
     "set_quiet_mode",
     "confirm_task",
+    "confirm_task_candidate",
 ]
 

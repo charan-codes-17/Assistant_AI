@@ -13,7 +13,6 @@ Tests:
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-import json
 from pathlib import Path
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
@@ -33,14 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from backend.config.settings import settings
 from backend.models.models import KnowledgeRecord, User
 from backend.services.embeddings import embed_texts
-from backend.services.llm import chat
+from backend.services.orchestrator import run_native_tool_loop
 import backend.services.retrieval as retrieval_module
 from backend.services.retrieval import (
     Judgment,
     JudgmentResult,
-    RETRIEVE_MEMORY_TOOL,
     retrieve_memory,
-    tool_result_for_model,
 )
 
 FIXED_NOW = datetime(2026, 10, 17, 10, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
@@ -213,6 +210,7 @@ async def main() -> None:
     results: List[Dict[str, Any]] = []
     case1_timings: Dict[str, float] = {}
     case7a_final_reply: str = ""
+    loop_7a = None
 
     print("=" * 95)
     print("PHASE 2 TASK 2.2: MEMORY RETRIEVAL & RELEVANCE EVALUATION")
@@ -600,54 +598,16 @@ async def main() -> None:
                 {"role": "system", "content": SYSTEM_TOOL_PROMPT},
                 {"role": "user", "content": "I'm stuck on a calculus problem"},
             ]
-            msg_7a = await chat(tier="fast", messages=messages_7a, tools=[RETRIEVE_MEMORY_TOOL])
-
-            tool_called_7a = bool(msg_7a.tool_calls) and any(
-                tc.function.name == "retrieve_memory" for tc in msg_7a.tool_calls
+            loop_7a = await run_native_tool_loop(
+                user_id=user_toolcall.id,
+                messages=messages_7a,
+                now=FIXED_NOW,
             )
-
-            final_mentions_functions = False
+            tool_called_7a = loop_7a.tool_called
+            case7a_final_reply = loop_7a.reply
+            final_mentions_functions = "function" in case7a_final_reply.lower()
             if tool_called_7a:
-                tc = next(tc for tc in msg_7a.tool_calls if tc.function.name == "retrieve_memory")
-                try:
-                    args = json.loads(tc.function.arguments)
-                    retrieval_query = args.get("query", "calculus")
-                except Exception:
-                    retrieval_query = "calculus"
-
-                print(f"   Model initiated tool call: retrieve_memory(query={retrieval_query!r})")
-                res_tool = await retrieve_memory(
-                    session=session,
-                    user=user_toolcall,
-                    query=retrieval_query,
-                    now=FIXED_NOW,
-                )
-                tool_output_str = tool_result_for_model(res_tool)
-
-                assistant_turn = {
-                    "role": "assistant",
-                    "content": msg_7a.content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                    ],
-                }
-                tool_turn = {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": tool_output_str,
-                }
-
-                followup_messages = messages_7a + [assistant_turn, tool_turn]
-                final_msg_7a = await chat(tier="fast", messages=followup_messages)
-                case7a_final_reply = str(final_msg_7a).strip()
-                final_mentions_functions = "function" in case7a_final_reply.lower()
+                print("   Model initiated tool call: retrieve_memory (via orchestrator loop)")
 
             c7a_pass = tool_called_7a and bool(case7a_final_reply) and final_mentions_functions
             results.append({
@@ -668,16 +628,20 @@ async def main() -> None:
                 {"role": "system", "content": SYSTEM_TOOL_PROMPT},
                 {"role": "user", "content": "what is 2+2?"},
             ]
-            msg_7b = await chat(tier="fast", messages=messages_7b, tools=[RETRIEVE_MEMORY_TOOL])
-            tool_called_7b = bool(msg_7b.tool_calls)
+            loop_7b = await run_native_tool_loop(
+                user_id=user_toolcall.id,
+                messages=messages_7b,
+                now=FIXED_NOW,
+            )
+            tool_called_7b = loop_7b.tool_called
             c7b_pass = not tool_called_7b
             results.append({
                 "id": "Case-7b",
                 "name": "Tool loop: 2+2 general knowledge",
                 "expected": "no tool call",
-                "actual": f"tool_calls={len(msg_7b.tool_calls) if msg_7b.tool_calls else 0}",
+                "actual": f"tool_called={tool_called_7b}",
                 "status": "PASS" if c7b_pass else "FAIL",
-                "detail": f"Correctly answered without tool call (reply_len={len(str(msg_7b))})",
+                "detail": f"Correctly answered without tool call (reply_len={len(loop_7b.reply)})",
             })
 
             # 7(c): "hello" -> no tool call
@@ -686,16 +650,20 @@ async def main() -> None:
                 {"role": "system", "content": SYSTEM_TOOL_PROMPT},
                 {"role": "user", "content": "hello"},
             ]
-            msg_7c = await chat(tier="fast", messages=messages_7c, tools=[RETRIEVE_MEMORY_TOOL])
-            tool_called_7c = bool(msg_7c.tool_calls)
+            loop_7c = await run_native_tool_loop(
+                user_id=user_toolcall.id,
+                messages=messages_7c,
+                now=FIXED_NOW,
+            )
+            tool_called_7c = loop_7c.tool_called
             c7c_pass = not tool_called_7c
             results.append({
                 "id": "Case-7c",
                 "name": "Tool loop: hello smalltalk",
                 "expected": "no tool call",
-                "actual": f"tool_calls={len(msg_7c.tool_calls) if msg_7c.tool_calls else 0}",
+                "actual": f"tool_called={tool_called_7c}",
                 "status": "PASS" if c7c_pass else "FAIL",
-                "detail": f"Correctly answered without tool call (reply_len={len(str(msg_7c))})",
+                "detail": f"Correctly answered without tool call (reply_len={len(loop_7c.reply)})",
             })
 
         finally:
@@ -855,7 +823,7 @@ async def main() -> None:
                 res1.candidates + res2.candidates + res3.candidates + res4.candidates +
                 res5.candidates +
                 res5b_dinner.candidates + res5b_css.candidates +
-                (res_tool.candidates if 'res_tool' in locals() else []) +
+                (loop_7a.retrieval.candidates if loop_7a is not None and loop_7a.retrieval is not None else []) +
                 res_na.candidates + res_nb.candidates + res_nc.candidates + res_nd.candidates
             )
             below_cutoff_candidates = [
