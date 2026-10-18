@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     # Embeddings: dimension MUST match the model; it is baked into the DB schema.
     EMBEDDING_MODEL: str = Field(description="Embedding model ID")
     EMBEDDING_DIM: int = Field(description="Vector dimension of EMBEDDING_MODEL")
+    EMBEDDING_TIMEOUT_SECONDS: float = Field(
+        default=4.0,
+        description=(
+            "Per-attempt wall-clock timeout for the query embedding call. One retry is "
+            "attempted, so the total embedding budget is EMBEDDING_TIMEOUT_SECONDS * 2; "
+            "after that the existing retrieval fail-open applies."
+        ),
+    )
 
     # Telegram
     TELEGRAM_BOT_TOKEN: str = Field(default="", description="Dev or deployed bot token")

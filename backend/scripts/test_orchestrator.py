@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import re
 import sys
 import uuid
@@ -61,6 +62,17 @@ TONE_PHRASES = (
 )
 EMOJI_RE = re.compile(r"[\U00010000-\U0010ffff]")
 
+# Baseline for the LAT section, captured from a real run on the PRE-change orchestrator
+# (router on the reply path). Printed next to the post-change numbers for comparison.
+LAT_BASELINE_LINES: List[str] = [
+    "run 1: time_to_reply=10.8234 embed=0.7323 search=1.7481 judge=1.3591 reply_generation=8.4910 retries=0",
+    "run 2: time_to_reply=7.2370 embed=0.7049 search=0.8126 judge=1.4079 reply_generation=5.7576 retries=0",
+    "run 3: time_to_reply=6.3912 embed=0.2941 search=0.1423 judge=1.7303 reply_generation=5.1581 retries=0",
+    "run 4: time_to_reply=5.9650 embed=0.2641 search=0.1532 judge=1.4260 reply_generation=4.6482 retries=0",
+    "run 5: time_to_reply=10.5499 embed=4.6638 search=0.1061 judge=1.6607 reply_generation=8.9540 retries=1",
+    "time_to_reply min=5.9650 median=7.2370 max=10.8234",
+]
+
 
 def tone_violations(reply: str) -> List[str]:
     hits: List[str] = []
@@ -78,6 +90,27 @@ def tone_violations(reply: str) -> List[str]:
         if phrase in lower:
             hits.append(f"contains={phrase}")
     return hits
+
+
+class WarningCounter(logging.Handler):
+    """Collect WARNING log messages emitted by a logger (used to count embedding retries)."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: List[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
+
+
+def median(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
 
 
 async def create_test_user(session: AsyncSession, label: str) -> User:
@@ -764,18 +797,26 @@ async def main() -> None:
             # E8 Command: empty reply, no chat LLM
             # -----------------------------------------------------------------
             if want("E8"):
-                print("\n[E8] Command short-circuits chat LLM...")
+                print("\n[E8] Command short-circuits router + chat LLM...")
                 user = await create_test_user(session, "e8")
                 users_to_cleanup.append(user.id)
                 sess = await create_session(session, user.id)
                 chat_calls = 0
+                router_calls = 0
 
                 async def counting_chat(*a: Any, **k: Any) -> StrippedMessage:
                     nonlocal chat_calls
                     chat_calls += 1
                     return StrippedMessage("should not run")
 
-                with patch.object(orch_mod, "chat", side_effect=counting_chat):
+                async def counting_classify(text: str) -> RouterResult:
+                    nonlocal router_calls
+                    router_calls += 1
+                    return RouterResult(intent="question", cleaned_note=None)
+
+                with patch.object(orch_mod, "classify_turn", side_effect=counting_classify), patch.object(
+                    orch_mod, "chat", side_effect=counting_chat
+                ):
                     turn = await handle_turn(
                         user.id,
                         "/memory calculus",
@@ -783,13 +824,18 @@ async def main() -> None:
                         history=[],
                         now=FIXED_NOW,
                     )
-                e8_pass = turn.intent == "command" and turn.reply == "" and chat_calls == 0
+                e8_pass = (
+                    turn.intent == "command"
+                    and turn.reply == ""
+                    and chat_calls == 0
+                    and router_calls == 0
+                )
                 results.append(row(
                     "E8",
-                    "Command: no chat LLM, empty reply",
-                    "intent=command, reply='', chat_calls=0",
+                    "Command: no router LLM, no chat LLM, empty reply",
+                    "intent=command, reply='', chat_calls=0, router_calls=0",
                     e8_pass,
-                    f"intent={turn.intent} reply={turn.reply!r} chat_calls={chat_calls}",
+                    f"intent={turn.intent} reply={turn.reply!r} chat_calls={chat_calls} router_calls={router_calls}",
                     "router classifies slash-commands in code",
                 ))
 
@@ -1068,25 +1114,164 @@ async def main() -> None:
                     {"role": "user", "content": "help me understand mathematical functions"},
                     {"role": "assistant", "content": first.reply},
                 ]
-                second = await handle_turn(
-                    user.id,
-                    "what did I just ask?",
-                    session_id=sess.id,
-                    history=history,
-                    now=FIXED_NOW,
-                )
+                diag_e14_2, p_chat_e14_2, p_ret_e14_2 = instrument_turn()
+                with p_chat_e14_2, p_ret_e14_2:
+                    second = await handle_turn(
+                        user.id,
+                        "what did I just ask?",
+                        session_id=sess.id,
+                        history=history,
+                        now=FIXED_NOW,
+                    )
                 collected_replies.append(("E14-2", second.reply))
                 e14_pass = bool(second.reply.strip()) and "function" in second.reply.lower()
                 e14_name = "History: second turn refers to first"
                 print(f"   [E14] id=E14 name={e14_name!r}")
+                print("\n----- E14 second-turn diagnosis -----")
+                print_turn_diag("E14-2", second, diag_e14_2)
+                print("-------------------------------------\n")
                 results.append(row(
                     "E14",
                     e14_name,
                     "non-empty reply mentioning the earlier topic (function)",
                     e14_pass,
+                    f"intent={second.intent} tool_called={second.trace.tool_called} "
                     f"len={len(second.reply)} has_function={'function' in second.reply.lower()}",
                     f"id=E14 name={e14_name!r} reply={second.reply!r}",
                 ))
+
+            # -----------------------------------------------------------------
+            # E15 Embedding hedge: one timeout then retry succeeds (unit, fake client)
+            # -----------------------------------------------------------------
+            if want("E15"):
+                print("\n[E15] Embedding timeout is retried once and then succeeds...")
+                from backend.services import embeddings as emb_module
+
+                embed_attempts = 0
+
+                class _FakeEmbeddings:
+                    async def create(
+                        self, *, model: str, input: List[str], dimensions: int
+                    ) -> Any:
+                        nonlocal embed_attempts
+                        embed_attempts += 1
+                        if embed_attempts == 1:
+                            await asyncio.sleep(0.5)  # exceeds the patched per-attempt timeout
+                        return SimpleNamespace(
+                            data=[
+                                SimpleNamespace(
+                                    index=i, embedding=[0.0] * dimensions
+                                )
+                                for i, _ in enumerate(input)
+                            ]
+                        )
+
+                class _FakeClient:
+                    def __init__(self) -> None:
+                        self.embeddings = _FakeEmbeddings()
+
+                emb_logger = logging.getLogger("backend.services.embeddings")
+                counter = WarningCounter()
+                emb_logger.addHandler(counter)
+                raised_exc: Optional[Exception] = None
+                vectors: List[List[float]] = []
+                try:
+                    with patch.object(
+                        emb_module, "get_embeddings_client", return_value=_FakeClient()
+                    ), patch.object(emb_module.settings, "EMBEDDING_TIMEOUT_SECONDS", 0.05):
+                        try:
+                            vectors = await emb_module.embed_texts(["hello world"])
+                        except Exception as exc:  # noqa: BLE001 - reported below
+                            raised_exc = exc
+                finally:
+                    emb_logger.removeHandler(counter)
+
+                retry_logs = [m for m in counter.messages if "retrying" in m.lower()]
+                vector_dim = len(vectors[0]) if vectors else None
+                e15_pass = (
+                    raised_exc is None
+                    and len(vectors) == 1
+                    and vector_dim == settings.EMBEDDING_DIM
+                    and embed_attempts == 2
+                    and len(retry_logs) == 1
+                )
+                results.append(row(
+                    "E15",
+                    "Embedding timeout retried once, then succeeds",
+                    "first call times out, exactly one retry logged, result returned, no exception",
+                    e15_pass,
+                    f"attempts={embed_attempts} retry_logs={len(retry_logs)} raised={raised_exc!r} vectors={len(vectors)}",
+                    f"vector_dim={vector_dim} expected_dim={settings.EMBEDDING_DIM}",
+                ))
+
+            # -----------------------------------------------------------------
+            # LAT Reply-path latency (diagnostic only, no pass/fail)
+            # -----------------------------------------------------------------
+            if only is None or only == "LAT":
+                print("\n[LAT] Reply-path latency: E1 session-2 flow repeated 5x...")
+                user = await create_test_user(session, "lat")
+                users_to_cleanup.append(user.id)
+                sess = await create_session(session, user.id)
+                content = "User is learning mathematical functions"
+                vecs = await embed_texts([content])
+                rec = KnowledgeRecord(
+                    user_id=user.id,
+                    kind="knowledge",
+                    content=content,
+                    certainty="tentative",
+                    source="text",
+                    status="confirmed",
+                    embedding=vecs[0],
+                )
+                session.add(rec)
+                await session.commit()
+                await session.refresh(rec)
+
+                emb_logger = logging.getLogger("backend.services.embeddings")
+                counter = WarningCounter()
+                emb_logger.addHandler(counter)
+                lat_runs: List[Dict[str, float]] = []
+                try:
+                    for i in range(5):
+                        counter.messages.clear()
+                        turn = await handle_turn(
+                            user.id,
+                            "I'm stuck on a calculus problem",
+                            session_id=sess.id,
+                            history=[],
+                            source="text",
+                            now=FIXED_NOW,
+                        )
+                        collected_replies.append((f"LAT-{i + 1}", turn.reply))
+                        t = turn.trace.timings
+                        run = {
+                            "time_to_reply": t.get("time_to_reply", 0.0),
+                            "embed": t.get("embed", 0.0),
+                            "search": t.get("search", 0.0),
+                            "judge": t.get("judge", 0.0),
+                            "reply_generation": t.get("reply_generation", 0.0),
+                            "retries": float(len(counter.messages)),
+                        }
+                        lat_runs.append(run)
+                        print(
+                            f"   run {i + 1}: time_to_reply={run['time_to_reply']:.4f} "
+                            f"embed={run['embed']:.4f} search={run['search']:.4f} "
+                            f"judge={run['judge']:.4f} reply_generation={run['reply_generation']:.4f} "
+                            f"retries={int(run['retries'])}"
+                        )
+                finally:
+                    emb_logger.removeHandler(counter)
+
+                ttrs = [r["time_to_reply"] for r in lat_runs]
+                print(
+                    f"   time_to_reply min={min(ttrs):.4f} median={median(ttrs):.4f} max={max(ttrs):.4f}"
+                )
+                if LAT_BASELINE_LINES:
+                    print("   BEFORE this change (router on the reply path):")
+                    for line in LAT_BASELINE_LINES:
+                        print(f"      {line}")
+                else:
+                    print("   BEFORE numbers: not available in-suite (see task write-up).")
 
             # -----------------------------------------------------------------
             # E13 Tone check on every collected real reply

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 from sqlalchemy import select
 
 from backend.config.settings import settings
@@ -50,6 +50,7 @@ HISTORY_MAX_MESSAGES = 10
 HISTORY_MAX_CHARS = 2000
 MAX_RETRIEVE_CALLS = 1
 MAX_MODEL_ROUND_TRIPS = 2
+ROUTER_TIMEOUT_SECONDS = 15.0
 FALLBACK_REPLY = "Sorry, I couldn't generate a reply. Please try again."
 
 CHAT_SYSTEM_PROMPT = """You are a personal AI assistant with persistent structured memory.
@@ -135,7 +136,9 @@ class TraceInfo(BaseModel):
 class ReplyResult(BaseModel):
     turn_id: str
     session_id: int
-    intent: str
+    # None for non-commands at reply time: the router runs off the reply path and postprocess()
+    # fills in the final intent. "command" (and "smalltalk" for empty input) are set in code.
+    intent: str | None = None
     reply: str
     memory_used: list[MemoryUsedItem] = Field(default_factory=list)
     trace: TraceInfo = Field(default_factory=TraceInfo)
@@ -144,9 +147,27 @@ class ReplyResult(BaseModel):
     source: str = "text"
     cleaned_note: str | None = None
     retrieval: RetrievalResult | None = None
+    # Background router task. Private: never serialised into the public payload.
+    _router_task: "asyncio.Task[RouterResult] | None" = PrivateAttr(default=None)
+
+    def cancel_router_task(self) -> None:
+        """Cancel an un-awaited router task (e.g. when postprocess() is never called)."""
+        task = self._router_task
+        self._router_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    def __del__(self) -> None:
+        # Best-effort: if the caller never ran postprocess(), cancel the pending router task
+        # so asyncio does not warn about a task that was never awaited / destroyed while pending.
+        try:
+            self.cancel_router_task()
+        except Exception:  # pragma: no cover - interpreter shutdown safety
+            pass
 
 
 class PostResult(BaseModel):
+    intent: str = "question"
     pending_records: list[PendingRecord] = Field(default_factory=list)
     pending_tasks: list[CandidateTask] = Field(default_factory=list)
     intervention: InterventionDecision = Field(
@@ -254,6 +275,18 @@ def _tool_calls_payload(msg: Any) -> list[dict[str, Any]]:
             }
         )
     return payload
+
+
+def _consume_router_exception(task: "asyncio.Task[RouterResult]") -> None:
+    """Retrieve a finished router task's result so asyncio never warns 'exception never retrieved'.
+
+    Runs as a done-callback; postprocess() still awaits the task and handles failures itself.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Router task failed off the reply path: %s", exc)
 
 
 async def _resolve_now(user_id: int, now: datetime | None) -> datetime:
@@ -458,30 +491,44 @@ async def respond(
     source: str = "text",
     now: datetime | None = None,
 ) -> ReplyResult:
-    """Produce the user-visible reply. Caller may send it before postprocess()."""
+    """Produce the user-visible reply. Caller may send it before postprocess().
+
+    The router does NOT run on the reply path. Commands (slash) and empty input are classified
+    in code and return immediately; for every other input the router LLM call is started as a
+    background asyncio task and the chat model is called straight away with the retrieve_memory
+    tool. postprocess() awaits the router task and resolves the final intent. ReplyResult.intent
+    is therefore None for non-commands at reply time.
+    """
     t_all = time.perf_counter()
     turn_id = str(uuid.uuid4())
     ref_now = await _resolve_now(user_id, now)
     errors: list[str] = []
     timings: dict[str, float] = {}
 
-    t_router = time.perf_counter()
-    router_result: RouterResult = await classify_turn(text)
-    timings["router"] = round(time.perf_counter() - t_router, 4)
+    # Code-only classification, mirroring router.classify_turn's two non-LLM paths
+    # (router.py is out of scope for this change).
+    stripped = text.strip()
+    if not stripped:
+        code_intent: str | None = "smalltalk"
+    elif stripped.startswith("/"):
+        code_intent = "command"
+    else:
+        code_intent = None
 
     reply = ReplyResult(
         turn_id=turn_id,
         session_id=int(session_id),
-        intent=router_result.intent,
+        intent=None,
         reply="",
         user_text=text,
         source=source,
-        cleaned_note=router_result.cleaned_note,
+        cleaned_note=None,
         trace=TraceInfo(timings=timings, errors=errors),
     )
 
-    if router_result.intent == "command":
-        reply.reply = ""
+    if code_intent is not None:
+        # Command (slash) / empty input: resolved in code, no router LLM, no chat LLM.
+        reply.intent = code_intent
         timings["time_to_reply"] = round(time.perf_counter() - t_all, 4)
         reply.trace.timings = timings
         return reply
@@ -494,22 +541,13 @@ async def respond(
         + [user_msg]
     )
 
-    if router_result.intent == "smalltalk":
-        t_gen = time.perf_counter()
-        try:
-            msg = await chat(tier="fast", messages=messages)
-            reply.reply = str(msg).strip() or FALLBACK_REPLY
-            if not str(msg).strip():
-                logger.error("Empty smalltalk reply; returning fallback. turn_id=%s", turn_id)
-        except LLMEmptyResponse:
-            logger.error("Empty smalltalk reply; returning fallback. turn_id=%s", turn_id)
-            reply.reply = FALLBACK_REPLY
-        timings["reply_generation"] = round(time.perf_counter() - t_gen, 4)
-        timings["time_to_reply"] = round(time.perf_counter() - t_all, 4)
-        reply.trace.timings = timings
-        return reply
+    # Start the router off the reply path; postprocess() awaits it and resolves the intent.
+    router_task: asyncio.Task[RouterResult] = asyncio.create_task(classify_turn(text))
+    router_task.add_done_callback(_consume_router_exception)
+    reply._router_task = router_task
 
-    # question / note / both: native tool loop
+    # Go straight to the chat model with the retrieve_memory tool; the model itself decides
+    # whether the turn needs memory (it does not call the tool for pure smalltalk).
     loop = await run_native_tool_loop(
         user_id=user_id,
         messages=messages,
@@ -538,11 +576,39 @@ async def postprocess(
     """Extraction + conversation intervention. Never raises. Never confirms writes."""
     post = PostResult()
     try:
-        if reply_result.intent in ("smalltalk", "command"):
+        # Resolve the intent: commands and smalltalk-empty were set in code by respond();
+        # everything else settled the router task running off the reply path.
+        intent = reply_result.intent
+        router_task = reply_result._router_task
+        if router_task is not None:
+            reply_result._router_task = None  # take ownership so __del__ won't cancel it
+            t_router = time.perf_counter()
+            try:
+                router_result = await asyncio.wait_for(router_task, timeout=ROUTER_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Router task timed out in postprocess (limit=%.2fs); defaulting to intent='question'.",
+                    ROUTER_TIMEOUT_SECONDS,
+                )
+                router_task.cancel()
+                router_result = RouterResult(intent="question", cleaned_note=None)
+                post.trace.errors.append("router: timeout, defaulted to intent=question")
+            except Exception as exc:
+                logger.warning("Router task failed in postprocess: %s", exc)
+                router_result = RouterResult(intent="question", cleaned_note=None)
+                post.trace.errors.append(f"router: {exc}")
+            intent = router_result.intent
+            reply_result.intent = intent
+            reply_result.cleaned_note = router_result.cleaned_note
+            post.trace.timings["router"] = round(time.perf_counter() - t_router, 4)
+
+        post.intent = intent or "question"
+
+        if intent in ("smalltalk", "command"):
             post.trace.skipped = True
             post.intervention = InterventionDecision(
                 action="none",
-                reason=f"postprocess skipped for intent={reply_result.intent}",
+                reason=f"postprocess skipped for intent={intent}",
             )
             return post
 
@@ -752,7 +818,7 @@ async def handle_turn(
     return TurnResult(
         turn_id=reply.turn_id,
         session_id=reply.session_id,
-        intent=reply.intent,
+        intent=post.intent,
         reply=reply.reply,
         memory_used=reply.memory_used,
         pending_records=post.pending_records,
