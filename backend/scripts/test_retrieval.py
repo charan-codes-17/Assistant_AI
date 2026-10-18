@@ -651,6 +651,28 @@ async def main() -> None:
             c6d_pass = res6d.timed_out is True and len(res6d.items) == 0
             c6c_pass = fake_llm_call_count == 0 and len(res6c.items) == 0
 
+            # 6(e): Query-embedding failure. A TimeoutError from the query embedding carries its
+            # own budget (EMBEDDING_TIMEOUT_SECONDS) and must be reported as embedding_failed,
+            # NOT mislabelled as a whole-retrieval timeout. timed_out must stay False.
+            print("Running Case 6e: Query embedding TimeoutError -> embedding_failed...")
+            async def fake_embed_timeout(
+                texts: List[str], timeout: Optional[float] = None
+            ) -> List[List[float]]:
+                raise asyncio.TimeoutError()
+
+            with unittest.mock.patch.object(retrieval_module, "embed_texts", side_effect=fake_embed_timeout):
+                res6e = await retrieve_memory(
+                    session=session,
+                    user=user_unit,
+                    query="I'm stuck on a calculus problem",
+                    now=FIXED_NOW,
+                )
+            c6e_pass = (
+                res6e.embedding_failed is True
+                and res6e.timed_out is False
+                and len(res6e.items) == 0
+            )
+
             results.append({
                 "id": "Case-6a",
                 "name": "Unit: invalid candidate ID discarded",
@@ -682,6 +704,14 @@ async def main() -> None:
                 "actual": f"timed_out={res6d.timed_out}, items={len(res6d.items)}",
                 "status": "PASS" if c6d_pass else "FAIL",
                 "detail": f"Safely timed out (timed_out={res6d.timed_out}, items={len(res6d.items)})",
+            })
+            results.append({
+                "id": "Case-6e",
+                "name": "Unit: query-embedding timeout labelled",
+                "expected": "embedding_failed=True, timed_out=False, items=0",
+                "actual": f"embedding_failed={res6e.embedding_failed}, timed_out={res6e.timed_out}, items={len(res6e.items)}",
+                "status": "PASS" if c6e_pass else "FAIL",
+                "detail": f"embedding_failed={res6e.embedding_failed}, timed_out={res6e.timed_out}, no exception raised",
             })
 
         finally:

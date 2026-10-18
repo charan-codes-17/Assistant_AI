@@ -94,6 +94,10 @@ class RetrievalResult(BaseModel):
     candidates_considered: int = 0
     timings: Dict[str, float] = Field(default_factory=dict)
     timed_out: bool = False
+    # True when the query embedding failed locally (its own budget was exhausted). This is a
+    # fail-open outcome distinct from `timed_out` (which is reserved for the overall
+    # RETRIEVAL_TIMEOUT_SECONDS budget). `timed_out` stays False for an embedding failure.
+    embedding_failed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -174,11 +178,29 @@ async def retrieve_memory(
     async def _do_retrieve() -> RetrievalResult:
         timings: Dict[str, float] = {}
 
-        # Step 1: Embed the query
+        # Step 1: Embed the query. The embedding call carries its own budget
+        # (EMBEDDING_TIMEOUT_SECONDS); if that budget is exhausted we fail open HERE, locally,
+        # so it is NOT mislabelled as a whole-retrieval timeout. timed_out stays False and
+        # embedding_failed=True reports the real cause.
         t_embed_start = time.perf_counter()
-        query_embeddings = await embed_texts(
-            [query], timeout=settings.EMBEDDING_TIMEOUT_SECONDS
-        )
+        try:
+            query_embeddings = await embed_texts(
+                [query], timeout=settings.EMBEDDING_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Query embedding failed (budget %.2fs exhausted) for user_id=%s; "
+                "replying without memory (embedding_failed).",
+                settings.EMBEDDING_TIMEOUT_SECONDS,
+                user.id,
+            )
+            return RetrievalResult(
+                items=[],
+                candidates_considered=0,
+                timings={"embed": round(time.perf_counter() - t_embed_start, 4), "search": 0.0, "judge": 0.0},
+                timed_out=False,
+                embedding_failed=True,
+            )
         if not query_embeddings:
             return RetrievalResult(
                 items=[],

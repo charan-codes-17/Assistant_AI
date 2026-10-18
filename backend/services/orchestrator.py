@@ -134,6 +134,9 @@ class TraceInfo(BaseModel):
     retrieval_ran: bool = False
     candidates_considered: int = 0
     retrieval_timed_out: bool = False
+    # True when the query embedding failed locally (fail-open, no memory). Distinct from
+    # retrieval_timed_out, which is reserved for the overall retrieval budget.
+    retrieval_embedding_failed: bool = False
     errors: list[str] = Field(default_factory=list)
     skipped: bool = False  # True when conversation intervention was skipped
 
@@ -386,6 +389,9 @@ async def respond(
     reply.retrieval = retrieval
     reply.trace.retrieval_ran = True
     reply.trace.retrieval_timed_out = bool(retrieval.timed_out)
+    reply.trace.retrieval_embedding_failed = bool(retrieval.embedding_failed)
+    if retrieval.embedding_failed:
+        errors.append("retrieval: query embedding failed; replied without memory")
     reply.trace.candidates_considered = retrieval.candidates_considered
     reply.memory_used = [] if retrieval.timed_out else items_from_retrieval(retrieval)
 
@@ -688,6 +694,7 @@ async def handle_turn(
             retrieval_ran=reply.trace.retrieval_ran,
             candidates_considered=reply.trace.candidates_considered,
             retrieval_timed_out=reply.trace.retrieval_timed_out,
+            retrieval_embedding_failed=reply.trace.retrieval_embedding_failed,
             errors=errors,
             skipped=post.trace.skipped,
         ),

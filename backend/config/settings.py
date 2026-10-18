@@ -86,6 +86,14 @@ class Settings(BaseSettings):
         default=0.90,
         description="Cosine similarity threshold for deduplicating knowledge records",
     )
+    PENDING_DEDUPE_TTL_HOURS: int = Field(
+        default=24,
+        description=(
+            "Pending knowledge records older than this many hours no longer count as duplicates "
+            "during dedupe staging (used by stage_candidates, hence extraction and onboarding). "
+            "Confirmed rows always count. Stale pending rows are left in place, never deleted."
+        ),
+    )
 
     # Retrieval & Relevance
     RETRIEVAL_TOP_K: int = Field(

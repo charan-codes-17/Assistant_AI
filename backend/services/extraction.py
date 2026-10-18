@@ -6,13 +6,13 @@ and stages unconfirmed records in the database.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config.settings import settings
@@ -226,6 +226,13 @@ async def stage_candidates(
     candidate_contents = [c.content for c in candidates]
     embeddings = await embed_texts(candidate_contents)
 
+    # Pending-TTL dedupe: only RECENT pending rows count as duplicates. A pending row older than
+    # settings.PENDING_DEDUPE_TTL_HOURS is ignored for dedupe (but never deleted or modified).
+    # Confirmed rows always count regardless of age.
+    pending_cutoff = datetime.now(timezone.utc) - timedelta(
+        hours=settings.PENDING_DEDUPE_TTL_HOURS
+    )
+
     accepted_embeddings: List[Any] = []
 
     for candidate, embedding, ref in zip(candidates, embeddings, refs):
@@ -255,7 +262,14 @@ async def stage_candidates(
             select(KnowledgeRecord, cosine_dist_expr)
             .where(
                 KnowledgeRecord.user_id == user_id,
-                KnowledgeRecord.status.in_(["pending", "confirmed"]),
+                # Confirmed rows always count; pending rows only within the TTL window.
+                or_(
+                    KnowledgeRecord.status == "confirmed",
+                    and_(
+                        KnowledgeRecord.status == "pending",
+                        KnowledgeRecord.created_at >= pending_cutoff,
+                    ),
+                ),
                 KnowledgeRecord.superseded_by.is_(None),
                 KnowledgeRecord.embedding.is_not(None),
             )

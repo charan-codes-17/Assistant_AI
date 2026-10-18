@@ -7,7 +7,7 @@ Cleans up all throwaway users in finally blocks.
 
 import argparse
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import math
 from pathlib import Path
 import sys
@@ -27,7 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from backend.config.settings import settings
 from backend.models.models import KnowledgeRecord, Task, User
 from backend.services.embeddings import embed_texts
-from backend.services.extraction import StagedResult, extract_and_stage
+from backend.services.extraction import (
+    CandidateRecord,
+    StagedResult,
+    extract_and_stage,
+    stage_candidates,
+)
 from backend.services.memory_search import search_confirmed
 
 FIXED_NOW = datetime(2026, 10, 17, 10, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
@@ -722,6 +727,84 @@ async def main() -> None:
                 "actual": f"due={actual_due_14.isoformat() if actual_due_14 else None}",
                 "status": "PASS" if c14_pass else "FAIL",
                 "detail": f"tasks={len(res14.pending_tasks)}, actual_due={actual_due_14} ({lat14}s)",
+            })
+
+            # -------------------------------------------------------------
+            # Case 15: Pending dedupe TTL (PENDING_DEDUPE_TTL_HOURS)
+            # -------------------------------------------------------------
+            print("Running Case 15: Pending dedupe TTL filter...")
+            ttl_hours = settings.PENDING_DEDUPE_TTL_HOURS
+            ttl_fact = "User is learning mathematical functions"
+
+            async def _seed_and_stage(label: str, status: str, age_hours: float):
+                """Seed one row with an injected created_at, then stage the same fact via
+                stage_candidates. Returns (StagedResult, seeded_row_still_present)."""
+                u = await create_test_user(session, label)
+                users_to_cleanup.append(u.id)
+                vecs = await embed_texts([ttl_fact])
+                seeded = KnowledgeRecord(
+                    user_id=u.id,
+                    kind="knowledge",
+                    content=ttl_fact,
+                    certainty="tentative",
+                    source="text",
+                    status=status,
+                    created_at=datetime.now(timezone.utc) - timedelta(hours=age_hours),
+                    embedding=vecs[0],
+                )
+                session.add(seeded)
+                await session.commit()
+                await session.refresh(seeded)
+                staged = await stage_candidates(
+                    session,
+                    u.id,
+                    [CandidateRecord(kind="knowledge", content=ttl_fact, certainty="tentative")],
+                    source="text",
+                    source_ref="ttl-test",
+                )
+                still_present = await session.get(KnowledgeRecord, seeded.id)
+                return staged, still_present
+
+            # 15a: pending 1h old (< TTL) -> counts as a duplicate, nothing staged
+            staged_1h, seed_1h = await _seed_and_stage("ttl1h", "pending", 1)
+            c15a_pass = len(staged_1h.duplicates) == 1 and len(staged_1h.staged_records) == 0
+            results.append({
+                "id": "Case-15a",
+                "name": f"Pending dedupe within TTL ({ttl_hours}h)",
+                "expected": "duplicate (1), staged (0)",
+                "actual": f"duplicates={len(staged_1h.duplicates)}, staged={len(staged_1h.staged_records)}",
+                "status": "PASS" if c15a_pass else "FAIL",
+                "detail": f"pending 1h old counted as duplicate (duplicates={len(staged_1h.duplicates)})",
+            })
+
+            # 15b: pending 25h old (> TTL) -> NOT a duplicate; same fact staged as a new row,
+            # and the stale row is left in place (never deleted/modified).
+            staged_25h, seed_25h = await _seed_and_stage("ttl25h", "pending", ttl_hours + 1)
+            c15b_pass = (
+                len(staged_25h.staged_records) == 1
+                and len(staged_25h.duplicates) == 0
+                and seed_25h is not None
+                and seed_25h.status == "pending"
+            )
+            results.append({
+                "id": "Case-15b",
+                "name": f"Pending dedupe beyond TTL ({ttl_hours}h)",
+                "expected": "new row staged (1), stale row not counted & kept",
+                "actual": f"staged={len(staged_25h.staged_records)}, duplicates={len(staged_25h.duplicates)}",
+                "status": "PASS" if c15b_pass else "FAIL",
+                "detail": f"25h old pending ignored; stale row still present={seed_25h is not None}",
+            })
+
+            # 15c: confirmed 30 days old -> always counts as a duplicate
+            staged_conf, seed_conf = await _seed_and_stage("ttlconf", "confirmed", 24 * 30)
+            c15c_pass = len(staged_conf.duplicates) == 1 and len(staged_conf.staged_records) == 0
+            results.append({
+                "id": "Case-15c",
+                "name": "Confirmed dedupe ignores TTL",
+                "expected": "duplicate (1), staged (0)",
+                "actual": f"duplicates={len(staged_conf.duplicates)}, staged={len(staged_conf.staged_records)}",
+                "status": "PASS" if c15c_pass else "FAIL",
+                "detail": f"confirmed 30 days old still counted (duplicates={len(staged_conf.duplicates)})",
             })
 
         finally:
