@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -47,6 +48,35 @@ HISTORY_MAX_MESSAGES = 10
 HISTORY_MAX_CHARS = 2000
 ROUTER_TIMEOUT_SECONDS = 15.0
 FALLBACK_REPLY = "Sorry, I couldn't generate a reply. Please try again."
+
+# Deterministic filler-opener guard. The tone rule in CHAT_SYSTEM_PROMPT asks the model not to
+# open with these, but the model is nondeterministic, so we strip a leading opener from the final
+# reply. Anchored at the start; the opener must be followed by punctuation then optional space.
+FILLER_OPENER_RE = re.compile(
+    r"^(?:sure thing|sure|great question|absolutely|of course|certainly|okay|ok|alright)"
+    r"\s*[,.!\-:]\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_filler_opener(reply: str) -> str:
+    """Strip a leading filler opener (e.g. "Sure, ") and re-capitalise the remainder.
+
+    Returns the original reply unchanged when there is no opener, or when stripping would
+    leave an empty reply (e.g. "Sure.").
+    """
+    if not reply:
+        return reply
+    match = FILLER_OPENER_RE.match(reply)
+    if not match:
+        return reply
+    remainder = reply[match.end():].lstrip()
+    if not remainder:
+        return reply
+    if remainder[0].islower():
+        remainder = remainder[0].upper() + remainder[1:]
+    return remainder
+
 
 CHAT_SYSTEM_PROMPT = """You are a personal AI assistant with persistent structured memory.
 Be plain, direct, and concise. No emoji. No flattery. No filler openers such as "Sure thing", "Great question", "Absolutely", or "Of course". Be willing to disagree with the user.
@@ -378,6 +408,7 @@ async def respond(
     if not reply_text:
         logger.error("Empty chat reply in respond; returning fallback.")
         reply_text = FALLBACK_REPLY
+    reply_text = strip_filler_opener(reply_text)
     reply.reply = reply_text
     timings["reply_generation"] = round(time.perf_counter() - t_gen, 4)
     timings["time_to_reply"] = round(time.perf_counter() - t_all, 4)

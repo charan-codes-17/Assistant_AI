@@ -5,6 +5,7 @@ tests deduplication and confirmed gating, and computes cosine similarities for t
 Cleans up all throwaway users in finally blocks.
 """
 
+import argparse
 import asyncio
 from datetime import datetime
 import math
@@ -40,6 +41,16 @@ def cosine_similarity(v1: List[float], v2: List[float]) -> float:
     if norm1 == 0.0 or norm2 == 0.0:
         return 0.0
     return dot / (norm1 * norm2)
+
+
+def median(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
 
 
 async def create_test_user(session: AsyncSession, label: str) -> User:
@@ -94,11 +105,108 @@ async def print_tuning_pairs() -> None:
         print()
 
 
+async def run_paraphrase(async_session: async_sessionmaker) -> None:
+    """Measure-only dedupe margin (no pass/fail, no threshold change).
+
+    Runs extraction on the same seed fact "help me understand mathematical functions"
+    10 times in separate throwaway users, collects the phrasings the model produces,
+    then embeds the distinct phrasings and reports pairwise cosine similarity and each
+    phrasing's similarity against "User is learning mathematical functions".
+    """
+    runs = 10
+    seed_text = "help me understand mathematical functions"
+    canonical = "User is learning mathematical functions"
+
+    print("=" * 90)
+    print("PARAPHRASE: DEDUPE MARGIN MEASUREMENT (MEASURE ONLY, NO PASS/FAIL)")
+    print(f"Reference Clock: {FIXED_NOW.strftime('%Y-%m-%d %H:%M:%S %Z (%A)')}")
+    print(f"Dedupe Threshold: {settings.DEDUPE_THRESHOLD}")
+    print(f"Seed fact: {seed_text!r}  (x{runs} runs, separate throwaway users)")
+    print("=" * 90)
+
+    async with async_session() as session:
+        users: List[int] = []
+        phrasings: List[str] = []
+        try:
+            for i in range(runs):
+                user = await create_test_user(session, f"para{i}")
+                users.append(user.id)
+                res = await extract_and_stage(
+                    session=session,
+                    user=user,
+                    text=seed_text,
+                    source="text",
+                    now=FIXED_NOW,
+                )
+                produced = [r.content for r in res.staged_records]
+                phrasings.extend(produced)
+                print(f"   run {i + 1}: staged={len(res.staged_records)} phrasing={produced!r}")
+        finally:
+            for uid in users:
+                await cleanup_user(session, uid)
+            print(f"\nCleaned up {len(users)} throwaway user(s).")
+
+    distinct = sorted({p for p in phrasings})
+    print("\n" + "-" * 90)
+    print(f"Distinct phrasings: {len(distinct)} (from {len(phrasings)} staged record(s))")
+    for i, p in enumerate(distinct):
+        print(f"   [{i}] {p!r}")
+    print("-" * 90)
+
+    if not distinct:
+        print("No phrasings produced; nothing to embed.")
+        return
+
+    texts = distinct + [canonical]
+    vectors = await embed_texts(texts)
+    vec_by_text = {t: v for t, v in zip(texts, vectors)}
+
+    print("\nPAIRWISE COSINE SIMILARITY BETWEEN DISTINCT PHRASINGS")
+    print("-" * 90)
+    pair_sims: List[float] = []
+    pairs_below = 0
+    for i in range(len(distinct)):
+        for j in range(i + 1, len(distinct)):
+            sim = cosine_similarity(vec_by_text[distinct[i]], vec_by_text[distinct[j]])
+            pair_sims.append(sim)
+            below = sim < settings.DEDUPE_THRESHOLD
+            if below:
+                pairs_below += 1
+            print(f"   {sim:.4f}  {'BELOW' if below else 'above'}  {distinct[i]!r}  <>  {distinct[j]!r}")
+
+    print("\nCOSINE SIMILARITY vs CANONICAL " + repr(canonical))
+    print("-" * 90)
+    for p in distinct:
+        sim = cosine_similarity(vec_by_text[p], vec_by_text[canonical])
+        below = sim < settings.DEDUPE_THRESHOLD
+        print(f"   {sim:.4f}  {'BELOW' if below else 'above'}  {p!r}")
+
+    print("\n" + "-" * 90)
+    print("SUMMARY (pairwise phrasings)")
+    print("-" * 90)
+    if pair_sims:
+        print(f"   pairs={len(pair_sims)}")
+        print(f"   min={min(pair_sims):.4f} median={median(pair_sims):.4f} max={max(pair_sims):.4f}")
+        print(f"   pairs below DEDUPE_THRESHOLD ({settings.DEDUPE_THRESHOLD}): {pairs_below}/{len(pair_sims)}")
+    else:
+        print("   fewer than 2 distinct phrasings; no pairwise similarities to report.")
+
+
 async def main() -> None:
+    parser = argparse.ArgumentParser(description="Extraction service evaluation")
+    parser.add_argument("--only", default=None, help="Run one section only, e.g. PARAPHRASE")
+    args = parser.parse_args()
+    only = args.only.strip().upper() if args.only else None
+
     settings.require("NEBIUS_API_KEY", "CHAT_MODEL_FAST", "EMBEDDING_MODEL", "EMBEDDING_DIM", "DATABASE_URL")
 
     engine = create_async_engine(settings.DATABASE_URL, echo=False)
     async_session = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+    if only == "PARAPHRASE":
+        await run_paraphrase(async_session)
+        print("\nDone.")
+        return
 
     users_to_cleanup: List[int] = []
     results: List[Dict[str, Any]] = []
