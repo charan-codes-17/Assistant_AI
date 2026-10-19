@@ -85,11 +85,27 @@ class FakeCallbackQuery:
         self.message = FakeMessage(chat_id, message_id=message_id)
 
 
+class FakeVoice:
+    def __init__(self, duration: int = 3, file_id: str = "voice-file") -> None:
+        self.duration = duration
+        self.file_id = file_id
+
+
+class FakeTgFile:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def download_as_bytearray(self) -> bytearray:
+        return bytearray(self._data)
+
+
 class FakeUpdate:
-    def __init__(self, chat_id: int, text=None, voice=False, callback=None) -> None:
+    def __init__(self, chat_id: int, text=None, voice=False, callback=None, duration: int = 3) -> None:
         self.effective_chat = FakeChat(chat_id)
         self.effective_user = FakeTelegramUser(chat_id)
-        self.message = FakeMessage(chat_id, text=text, voice=object() if voice else None)
+        self.message = FakeMessage(
+            chat_id, text=text, voice=FakeVoice(duration=duration) if voice else None
+        )
         self.callback_query = callback
 
 
@@ -99,11 +115,15 @@ class FakeBot:
         self.edits: list[dict] = []
         self.answers: list[str] = []
         self.actions: list[dict] = []
+        self.voice_bytes = b"fake-ogg-bytes"
         self._t0 = time.perf_counter()
         self._mid = 100
 
     def _now(self) -> float:
         return time.perf_counter() - self._t0
+
+    async def get_file(self, file_id, **kwargs):
+        return FakeTgFile(self.voice_bytes)
 
     async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
         self._mid += 1
@@ -670,11 +690,36 @@ async def b10d() -> dict:
     chat = next_chat()
     await db_add_user(chat)
     bot, ctx, st = make_env()
-    await handlers.on_voice(FakeUpdate(chat, voice=True), ctx, state=st)
-    ok = any(m["text"] == handlers.VOICE_PLACEHOLDER for m in bot.sent)
-    return row("B10d", "voice -> placeholder",
-               "voice placeholder text sent",
-               f"sent={[m['text'] for m in bot.sent]}", ok, "")
+    captured = {"source": None, "text": None}
+
+    async def respond(user_id, text, *, session_id, history, source="text", now=None):
+        captured["source"] = source
+        captured["text"] = text
+        return ReplyResult(
+            turn_id="turn-voice", session_id=session_id, reply="mocked reply", memory_used=[]
+        )
+
+    old_transcribe = handlers.audio_service.transcribe_bytes
+    handlers.audio_service.transcribe_bytes = lambda data: "hello from voice"
+    try:
+        with mock_orchestrator(respond, make_postprocess()):
+            await handlers.on_voice(FakeUpdate(chat, voice=True), ctx, state=st)
+            await drain(st)
+    finally:
+        handlers.audio_service.transcribe_bytes = old_transcribe
+
+    texts = [m["text"] for m in bot.sent if m["chat_id"] == chat]
+    heard_first = bool(texts) and texts[0] == "Heard: hello from voice"
+    replied = any(m["text"] == "mocked reply" for m in bot.sent if m["chat_id"] == chat)
+    ok = (
+        heard_first
+        and replied
+        and captured["source"] == "voice"
+        and captured["text"] == "hello from voice"
+    )
+    return row("B10d", "voice -> transcribe then reply",
+               'transcribed; "Heard: ..." first, then reply with source="voice"',
+               f"texts={texts}, source={captured['source']}, text={captured['text']!r}", ok, "")
 
 
 # ---------------------------------------------------------------------------
@@ -738,6 +783,62 @@ async def b14() -> dict:
                "both respond calls start before either finishes",
                f"concurrent={concurrent}, order={order}, elapsed={elapsed:.2f}s (serial sleeps would be ~{serial_elapsed:.2f}s)",
                ok, "")
+
+
+# ---------------------------------------------------------------------------
+# B15 (LaTeX stripping, reached through strip_markdown -> the _send_reply hook)
+# ---------------------------------------------------------------------------
+async def b15() -> dict:
+    checks: list[tuple[str, bool, str]] = []
+
+    def check(label: str, got: str, want: str) -> None:
+        checks.append((label, got == want, f"got={got!r} want={want!r}"))
+
+    # 1
+    check("1 x^2", textfmt.strip_markdown(r"\(x^2\)"), "x^2")
+    # 2
+    check("2 frac", textfmt.strip_markdown(r"\(\frac{a}{b}\)"), "(a)/(b)")
+    # 3
+    check("3 sqrt", textfmt.strip_markdown(r"\(\sqrt{x}\)"), "sqrt(x)")
+
+    # 4
+    case4 = r"Formally \(f'(x)=\displaystyle\lim_{h\to0}\frac{f(x+h)-f(x)}{h}\)."
+    out4 = textfmt.strip_markdown(case4)
+    ok4 = (
+        "\\" not in out4
+        and "\\(" not in out4
+        and "lim(h→0)" in out4
+        and "/(h)" in out4
+    )
+    checks.append(("4 formula", ok4, f"out={out4!r}"))
+
+    # 5
+    case5 = r"Path C:\Users\x costs $5"
+    check("5 path/price", textfmt.strip_markdown(case5), case5)
+
+    # 6
+    check("6 plain", textfmt.strip_markdown("plain text, no math"), "plain text, no math")
+
+    # 7
+    case7 = r"broken \(x^2 with no close"
+    try:
+        out7 = textfmt.strip_markdown(case7)
+        checks.append(("7 unclosed", out7 == case7, f"out={out7!r}"))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(("7 unclosed", False, f"raised {exc!r}"))
+
+    # 8
+    once = textfmt.strip_markdown(case4)
+    twice = textfmt.strip_markdown(once)
+    checks.append(("8 idempotent", once == twice, f"once={once!r} twice={twice!r}"))
+
+    ok = all(good for _, good, _ in checks)
+    failed = [label for label, good, _ in checks if not good]
+    details = " | ".join(f"{label}: {'ok' if good else 'FAIL'} ({info})" for label, good, info in checks)
+    return row("B15", "LaTeX math stripped in replies",
+               "all 8 latex cases match exact expected output",
+               f"failed={failed if failed else 'none'}",
+               ok, details)
 
 
 # ---------------------------------------------------------------------------
@@ -844,25 +945,25 @@ async def b12() -> dict:
     module.configure_logging()
     levels = {
         name: logging.getLogger(name).level
-        for name in ("httpx", "httpcore", "telegram")
+        for name in ("httpx", "httpx2", "httpcore", "telegram")
     }
     ok = all(lvl >= logging.WARNING for lvl in levels.values())
     return row("B12", "logging silences token-bearing libs",
-               "httpx/httpcore/telegram level >= WARNING",
+               "httpx/httpx2/httpcore/telegram level >= WARNING",
                f"levels={levels}", ok, "")
 
 
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
-async def main() -> None:
+async def main() -> int:
     settings.require("DATABASE_URL")
     print("=" * 140)
-    print("PHASE 4a-3: TELEGRAM BOT HANDLERS EVALUATION (text only)")
+    print("PHASE 4b: TELEGRAM BOT HANDLERS EVALUATION (text + voice)")
     print("=" * 140)
 
     results: list[dict] = []
-    simple_cases = [b1, b2, b3, b4, b5, b6, b7, b8, b9, b10a, b10b, b10c, b10d, b12, b13, b14]
+    simple_cases = [b1, b2, b3, b4, b5, b6, b7, b8, b9, b10a, b10b, b10c, b10d, b12, b13, b14, b15]
     try:
         for case in simple_cases:
             print(f"--- Running {case.__name__.upper()} ---")
@@ -902,6 +1003,7 @@ async def main() -> None:
     passed = sum(1 for r in results if r["ok"])
     print(f"RESULT: {'ALL PASS' if all_passed else 'FAILURES PRESENT'} ({passed}/{len(results)})")
     print(f"B11 mention check (MEASURE ONLY, not a gate): {next((r['details'] for r in results if r['id'] == 'B11c'), '')}")
+    return 0 if all_passed else 1
 
 
 async def cleanup_users() -> None:
@@ -921,4 +1023,4 @@ async def cleanup_users() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

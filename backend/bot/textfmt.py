@@ -26,16 +26,92 @@ _CODE_RE = re.compile(r"`(.+?)`", re.DOTALL)
 _PARA_RE = re.compile(r"\n\n")
 _SENT_RE = re.compile(r"[.!?](?=\s)")
 
+# LaTeX math -> plain text. Only the spans delimited by \(...\), \[...\] and $$...$$ are
+# rewritten; everything outside them is left byte-for-byte unchanged (so "C:\Users\x" and
+# "$5" survive). An unclosed delimiter simply does not match, so the text is returned as-is.
+_MATH_SPAN_RE = re.compile(
+    r"\\\((?P<inline>.*?)\\\)"
+    r"|\\\[(?P<display>.*?)\\\]"
+    r"|\$\$(?P<dollar>.*?)\$\$",
+    re.DOTALL,
+)
+
+# A brace group that may itself hold one level of nested braces: {..} or {..{..}..}.
+_BRACED = r"\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}"
+
+_FRAC_RE = re.compile(r"\\frac\s*" + _BRACED + _BRACED)
+_SQRT_RE = re.compile(r"\\sqrt\s*" + _BRACED)
+_LIM_RE = re.compile(r"\\lim\s*(?:_" + _BRACED + r")?")
+_SUB_SUP_RE = re.compile(r"([\^_])" + _BRACED)
+_COMMAND_RE = re.compile(r"\\([A-Za-z]+)")
+
+_DROP_TOKENS = ("\\displaystyle", "\\left", "\\right", "\\quad", "\\,", "\\;", "\\!")
+_SYMBOLS = (
+    ("\\to", "→"),
+    ("\\cdot", "·"),
+    ("\\times", "×"),
+    ("\\pi", "π"),
+    ("\\infty", "∞"),
+    ("\\le", "≤"),
+    ("\\ge", "≥"),
+    ("\\ne", "≠"),
+)
+
+
+def _sub_sup(match: "re.Match[str]") -> str:
+    """x^{n} -> x^n, x_{n} -> x_n for a single token; multi-token keeps ^( ) / _( )."""
+    operator, inner = match.group(1), match.group(2)
+    token = inner.strip()
+    if re.fullmatch(r"[A-Za-z0-9]+", token):
+        return f"{operator}{token}"
+    return f"{operator}({inner})"
+
+
+def _lim(match: "re.Match[str]") -> str:
+    inner = match.group(1)
+    return f"lim({inner})" if inner is not None else "lim"
+
+
+def _math_to_plain(span: str) -> str:
+    """Rewrite the body of one math span (the delimiters are already removed)."""
+    for token in _DROP_TOKENS:
+        span = span.replace(token, "")
+    span = _FRAC_RE.sub(lambda m: f"({m.group(1)})/({m.group(2)})", span)
+    span = _SQRT_RE.sub(lambda m: f"sqrt({m.group(1)})", span)
+    span = _LIM_RE.sub(_lim, span)
+    for token, replacement in _SYMBOLS:
+        span = span.replace(token, replacement)
+    span = _SUB_SUP_RE.sub(_sub_sup, span)
+    span = _COMMAND_RE.sub(r"\1", span)
+    return span
+
+
+def _math_span(match: "re.Match[str]") -> str:
+    for group in ("inline", "display", "dollar"):
+        body = match.group(group)
+        if body is not None:
+            return _math_to_plain(body)
+    return match.group(0)
+
+
+def strip_latex(text: str) -> str:
+    """Convert LaTeX inside math delimiters to plain text; leave all other text untouched."""
+    if not text:
+        return text
+    return _MATH_SPAN_RE.sub(_math_span, text)
+
 
 def strip_markdown(text: str) -> str:
-    """Reduce a small markdown subset to plain text.
+    """Reduce a small markdown subset to plain text, and strip LaTeX inside math delimiters.
 
     Handles **bold**, *italic*, __bold__, _italic_, `code`, leading # headers, and leading
-    '* ' / '- ' bullets (both normalised to '- ').
+    '* ' / '- ' bullets (both normalised to '- '); then applies strip_latex for \\(..\\),
+    \\[..\\] and $$..$$ spans.
     """
     if not text:
         return text
-    out = _STAR_BULLET_RE.sub(r"\1- ", text)
+    out = strip_latex(text)
+    out = _STAR_BULLET_RE.sub(r"\1- ", out)
     out = _HEADER_RE.sub("", out)
     out = _BOLD_RE.sub(r"\1", out)
     out = _BOLD_UNDER_RE.sub(r"\1", out)

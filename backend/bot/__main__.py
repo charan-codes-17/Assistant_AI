@@ -8,6 +8,7 @@ and does not require a token.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from backend.config.settings import settings
@@ -16,14 +17,14 @@ from backend.config.settings import settings
 def configure_logging() -> None:
     """Configure root logging and silence the libraries that would log the bot token.
 
-    The token appears in the request URL, so httpx / httpcore / telegram are pinned to WARNING
-    to keep it out of the logs.
+    The token appears in the request URL, so httpx / httpx2 / httpcore / telegram are pinned to
+    WARNING to keep it out of the logs.
     """
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    for name in ("httpx", "httpcore", "telegram"):
+    for name in ("httpx", "httpx2", "httpcore", "telegram"):
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
@@ -54,10 +55,23 @@ def main() -> None:
             "INVITE_CODES is empty: nobody can sign up via /start <code>."
         )
 
+    async def warmup_whisper(application) -> None:
+        """Load the Whisper model once at startup without blocking the event loop."""
+        from backend.services import audio as audio_service
+
+        try:
+            await asyncio.to_thread(audio_service.warmup)
+            logging.getLogger(__name__).info("Whisper model warm-up complete.")
+        except Exception:  # noqa: BLE001 - voice notes will fail friendly until it works
+            logging.getLogger(__name__).warning(
+                "Whisper warm-up failed; voice notes will return an error until it succeeds."
+            )
+
     application = (
         Application.builder()
         .token(settings.TELEGRAM_BOT_TOKEN)
         .concurrent_updates(True)
+        .post_init(warmup_whisper)
         .build()
     )
     application.add_handler(CommandHandler("start", cmd_start))

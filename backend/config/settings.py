@@ -103,6 +103,20 @@ class Settings(BaseSettings):
             "against the repo root locally; the container sets this to /app/whisper_models."
         ),
     )
+    WHISPER_CPU_THREADS: int = Field(
+        default=2,
+        description="CPU threads used by faster-whisper (int8) transcription.",
+    )
+    VOICE_MAX_SECONDS: int = Field(
+        default=60,
+        description=(
+            "Voice notes longer than this many seconds are refused without downloading them."
+        ),
+    )
+    VOICE_TRANSCRIBE_TIMEOUT_SECONDS: int = Field(
+        default=60,
+        description="Hard timeout for a single voice transcription; the voice turn fails friendly.",
+    )
 
     # Database
     DATABASE_URL: str = Field(description="PostgreSQL async connection string")

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import time
 from datetime import datetime
 from typing import Any, Optional, Sequence
 from zoneinfo import ZoneInfo
@@ -29,6 +30,7 @@ from backend.config.settings import settings
 from backend.database import AsyncSessionLocal
 from backend.models.models import ConversationSession, KnowledgeRecord, User
 from backend.services import actions as actions_service
+from backend.services import audio as audio_service
 from backend.services import orchestrator
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,10 @@ WELCOME_BACK = "Welcome back."
 SIGNUP_PROMPT = "Please send /start <invite code> to begin."
 REFUSAL = "Sorry, I can't sign you up. Please send /start <invite code>."
 NOT_AVAILABLE = "That item is no longer available"
-VOICE_PLACEHOLDER = "Voice notes are not supported yet. Please type your message."
+VOICE_TOO_LONG = "That voice note is too long. Please keep it under {0} seconds."
+VOICE_NO_SPEECH = "I couldn't make out any speech in that. Could you try again?"
+VOICE_ERROR = "Sorry, I couldn't process that voice note. Please try again."
+VOICE_HEARD = "Heard: {0}"
 UNKNOWN_COMMAND = "That command is not available yet."
 GENERIC_ERROR = "Something went wrong. Please try again."
 EXTRACTION_FAILED = "I couldn't process that note for saving. You can send it again."
@@ -189,6 +194,36 @@ async def cmd_start(update: Any, context: Any, state: Any = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Shared turn pipeline (text and voice)
+# ---------------------------------------------------------------------------
+async def _run_turn(
+    context: Any, chat_id: int, user_id: int, text: str, source: str, st: Any, chat: Any
+) -> None:
+    """Reply first, then start the background postprocess. Caller must hold chat.lock."""
+    if chat.session_id is None:
+        async with AsyncSessionLocal() as session:
+            sess = ConversationSession(user_id=user_id, channel="telegram")
+            session.add(sess)
+            await session.commit()
+            await session.refresh(sess)
+            chat.session_id = sess.id
+
+    await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    history = list(chat.history)
+    reply = await orchestrator.respond(
+        user_id, text, session_id=chat.session_id, history=history, source=source
+    )
+    await _send_reply(context, chat_id, reply)
+    chat.history = _append_history(chat.history, text, reply.reply)
+
+    task = asyncio.create_task(
+        _postprocess_and_prompt(user_id, chat_id, reply, context, st)
+    )
+    st.background.add(task)
+    task.add_done_callback(st.background.discard)
+
+
+# ---------------------------------------------------------------------------
 # Free-form text -> reply (then background postprocess)
 # ---------------------------------------------------------------------------
 @guarded
@@ -210,27 +245,7 @@ async def on_text(update: Any, context: Any, state: Any = None) -> None:
     chat = st.chat(chat_id)
 
     async with chat.lock:
-        if chat.session_id is None:
-            async with AsyncSessionLocal() as session:
-                sess = ConversationSession(user_id=user.id, channel="telegram")
-                session.add(sess)
-                await session.commit()
-                await session.refresh(sess)
-                chat.session_id = sess.id
-
-        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-        history = list(chat.history)
-        reply = await orchestrator.respond(
-            user.id, text, session_id=chat.session_id, history=history
-        )
-        await _send_reply(context, chat_id, reply)
-        chat.history = _append_history(chat.history, text, reply.reply)
-
-        task = asyncio.create_task(
-            _postprocess_and_prompt(user.id, chat_id, reply, context, st)
-        )
-        st.background.add(task)
-        task.add_done_callback(st.background.discard)
+        await _run_turn(context, chat_id, user.id, text, "text", st, chat)
 
 
 async def _send_reply(context: Any, chat_id: int, reply: Any) -> None:
@@ -346,19 +361,96 @@ async def _prompt_tasks(
 
 
 # ---------------------------------------------------------------------------
-# Voice (placeholder until Phase 4b)
+# Voice notes -> transcript -> the same turn pipeline
 # ---------------------------------------------------------------------------
+_voice_sem: Optional[asyncio.Semaphore] = None
+_voice_sem_loop: Any = None
+
+
+def _voice_semaphore() -> asyncio.Semaphore:
+    """One transcription at a time, per running event loop (a fresh loop gets a fresh lock)."""
+    global _voice_sem, _voice_sem_loop
+    loop = asyncio.get_running_loop()
+    if _voice_sem is None or _voice_sem_loop is not loop:
+        _voice_sem = asyncio.Semaphore(1)
+        _voice_sem_loop = loop
+    return _voice_sem
+
+
+async def _download_voice(context: Any, voice: Any) -> bytes:
+    tg_file = await context.bot.get_file(voice.file_id)
+    data = await tg_file.download_as_bytearray()
+    return bytes(data)
+
+
+async def _transcribe_voice(data: bytes) -> str:
+    async with _voice_semaphore():
+        return await asyncio.wait_for(
+            asyncio.to_thread(audio_service.transcribe_bytes, data),
+            timeout=settings.VOICE_TRANSCRIBE_TIMEOUT_SECONDS,
+        )
+
+
 @guarded
 async def on_voice(update: Any, context: Any, state: Any = None) -> None:
     if not _is_private(update):
         return
     chat_id = update.effective_chat.id
+    voice = getattr(getattr(update, "message", None), "voice", None)
+    if voice is None:
+        return
+
     async with AsyncSessionLocal() as session:
         user = await _user_by_chat(session, chat_id)
     if user is None:
+        # Unknown chat: no download, no transcription.
         await context.bot.send_message(chat_id=chat_id, text=SIGNUP_PROMPT)
         return
-    await context.bot.send_message(chat_id=chat_id, text=VOICE_PLACEHOLDER)
+
+    duration = getattr(voice, "duration", None)
+    if duration is not None and duration > settings.VOICE_MAX_SECONDS:
+        await context.bot.send_message(
+            chat_id=chat_id, text=VOICE_TOO_LONG.format(settings.VOICE_MAX_SECONDS)
+        )
+        return
+
+    st = state or _default_state(context)
+    chat = st.chat(chat_id)
+
+    async with chat.lock:
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        t_download = 0.0
+        t_transcribe = 0.0
+        try:
+            started = time.perf_counter()
+            data = await _download_voice(context, voice)
+            t_download = time.perf_counter() - started
+            started = time.perf_counter()
+            transcript = await _transcribe_voice(data)
+            t_transcribe = time.perf_counter() - started
+        except Exception:  # noqa: BLE001 - download/decode/transcribe/timeout all land here
+            logger.exception("voice handling failed for chat_id=%s", chat_id)
+            await context.bot.send_message(chat_id=chat_id, text=VOICE_ERROR)
+            return
+
+        # Privacy: duration, size and timings only; never the transcript or the bytes.
+        logger.info(
+            "voice turn: chat_id=%s duration=%ss bytes=%s download=%.2fs transcribe=%.2fs",
+            chat_id,
+            duration,
+            len(data),
+            t_download,
+            t_transcribe,
+        )
+
+        text = (transcript or "").strip()
+        if not text:
+            await context.bot.send_message(chat_id=chat_id, text=VOICE_NO_SPEECH)
+            return
+
+        await context.bot.send_message(chat_id=chat_id, text=VOICE_HEARD.format(text))
+        await _run_turn(context, chat_id, user.id, text, "voice", st, chat)
 
 
 # ---------------------------------------------------------------------------
