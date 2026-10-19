@@ -158,6 +158,18 @@ class Settings(BaseSettings):
         default=60,
         description="Lead time in minutes before task due_at to fire deadline reminders",
     )
+    REMINDER_SCAN_SECONDS: int = Field(
+        default=30,
+        description="Interval in seconds between deterministic scheduler reminder scans (used by 5b)",
+    )
+    REMINDER_MAX_OVERDUE_HOURS: int = Field(
+        default=24,
+        description="Do not fire a reminder for a task overdue by more than this many hours",
+    )
+    REMINDER_MAX_PER_USER_PER_TICK: int = Field(
+        default=2,
+        description="Max reminders selected per user per scheduler scan",
+    )
     INTERVENTION_TIMEOUT_SECONDS: float = Field(
         default=30.0,
         description="Wall-clock timeout in seconds for the conversation-path intervention LLM call",

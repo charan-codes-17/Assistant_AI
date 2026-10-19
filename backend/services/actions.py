@@ -422,11 +422,21 @@ async def mark_reminded(
     session: AsyncSession,
     task_id: int,
     now: Optional[datetime] = None,
+    *,
+    user: Optional[User] = None,
 ) -> Task:
-    """Update last_reminded_at on task (called by scheduler worker)."""
+    """Update last_reminded_at on task (called by scheduler worker).
+
+    When `user` is provided, the task must belong to that user and be in an remindable
+    status ("open" or "snoozed"); otherwise NotFoundError is raised so a forged caller
+    cannot mutate another user's task. `user` is optional only so pre-existing internal
+    callers keep working.
+    """
     stmt = select(Task).where(Task.id == task_id)
+    if user is not None:
+        stmt = stmt.where(Task.user_id == user.id)
     task = (await session.execute(stmt)).scalar_one_or_none()
-    if task is None:
+    if task is None or task.status not in ("open", "snoozed"):
         raise NotFoundError(f"Task {task_id} not found")
 
     task.last_reminded_at = now or datetime.now(timezone.utc)
