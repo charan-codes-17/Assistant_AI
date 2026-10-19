@@ -678,6 +678,69 @@ async def b10d() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# B13: empty / whitespace-only text makes zero orchestrator calls
+# ---------------------------------------------------------------------------
+async def b13() -> dict:
+    chat = next_chat()
+    await db_add_user(chat)
+    bot, ctx, st = make_env()
+    counter = [0]
+    with mock_orchestrator(make_respond(counter=counter), make_postprocess()):
+        for text in ("", "   ", "\n\t  \n"):
+            await send_text(bot, ctx, st, chat, text)
+        await drain(st)
+    sent_texts = [m["text"] for m in bot.sent if m["chat_id"] == chat]
+    ok = counter[0] == 0 and sent_texts == []
+    return row("B13", "empty/whitespace text -> no LLM call",
+               "0 orchestrator calls, nothing sent",
+               f"orchestrator_calls={counter[0]}, sent={sent_texts}",
+               ok, "")
+
+
+# ---------------------------------------------------------------------------
+# B14: two updates from two chats are processed concurrently
+# ---------------------------------------------------------------------------
+async def b14() -> dict:
+    chat_a = next_chat()
+    chat_b = next_chat()
+    uid_a = await db_add_user(chat_a)
+    uid_b = await db_add_user(chat_b)
+    bot, ctx, st = make_env()
+
+    tag_by_uid = {uid_a: "a", uid_b: "b"}
+    events: dict[str, dict] = {"a": {}, "b": {}}
+    order: list[str] = []
+
+    async def slow_respond(user_id, text, *, session_id, history, source="text", now=None):
+        tag = tag_by_uid.get(user_id, "?")
+        events[tag]["start"] = time.perf_counter()
+        order.append(f"{tag}:start")
+        await asyncio.sleep(0.5)
+        events[tag]["end"] = time.perf_counter()
+        order.append(f"{tag}:end")
+        return ReplyResult(turn_id=f"turn-{tag}", session_id=session_id, reply="ok", memory_used=[])
+
+    t0 = time.perf_counter()
+    with mock_orchestrator(slow_respond, make_postprocess()):
+        await asyncio.gather(
+            send_text(bot, ctx, st, chat_a, "hi from A"),
+            send_text(bot, ctx, st, chat_b, "hi from B"),
+        )
+        await drain(st)
+    elapsed = time.perf_counter() - t0
+
+    # The second respond must START before the first respond ENDS. If the two chats were
+    # serialized the order would be a:start, a:end, b:start, b:end.
+    concurrent = order[:2] in (["a:start", "b:start"], ["b:start", "a:start"])
+    serial_elapsed = 1.0  # two 0.5s sleeps back-to-back (measured separately from DB setup)
+    ok = concurrent
+    return row("B14", "two chats processed concurrently",
+               "both respond calls start before either finishes",
+               f"concurrent={concurrent}, order={order}, elapsed={elapsed:.2f}s (serial sleeps would be ~{serial_elapsed:.2f}s)",
+               ok, "")
+
+
+# ---------------------------------------------------------------------------
 # B11 (REAL end-to-end)
 # ---------------------------------------------------------------------------
 async def b11() -> list[dict]:
@@ -795,11 +858,11 @@ async def b12() -> dict:
 async def main() -> None:
     settings.require("DATABASE_URL")
     print("=" * 140)
-    print("PHASE 4a-2: TELEGRAM BOT HANDLERS EVALUATION (text only)")
+    print("PHASE 4a-3: TELEGRAM BOT HANDLERS EVALUATION (text only)")
     print("=" * 140)
 
     results: list[dict] = []
-    simple_cases = [b1, b2, b3, b4, b5, b6, b7, b8, b9, b10a, b10b, b10c, b10d, b12]
+    simple_cases = [b1, b2, b3, b4, b5, b6, b7, b8, b9, b10a, b10b, b10c, b10d, b12, b13, b14]
     try:
         for case in simple_cases:
             print(f"--- Running {case.__name__.upper()} ---")

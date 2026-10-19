@@ -197,6 +197,8 @@ async def on_text(update: Any, context: Any, state: Any = None) -> None:
         return
     chat_id = update.effective_chat.id
     text = getattr(getattr(update, "message", None), "text", "") or ""
+    if not text.strip():
+        return
 
     async with AsyncSessionLocal() as session:
         user = await _user_by_chat(session, chat_id)

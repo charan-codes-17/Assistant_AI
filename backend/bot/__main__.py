@@ -49,7 +49,17 @@ def main() -> None:
         on_voice,
     )
 
-    application = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
+    if not settings.INVITE_CODES.strip():
+        logging.getLogger(__name__).warning(
+            "INVITE_CODES is empty: nobody can sign up via /start <code>."
+        )
+
+    application = (
+        Application.builder()
+        .token(settings.TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("newsession", on_newsession))
     application.add_handler(CallbackQueryHandler(on_callback))
@@ -58,7 +68,10 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.COMMAND, on_other_command))
     application.add_error_handler(on_error)
 
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"],
+    )
 
 
 if __name__ == "__main__":
