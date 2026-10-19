@@ -170,6 +170,10 @@ class Settings(BaseSettings):
         default=2,
         description="Max reminders selected per user per scheduler scan",
     )
+    REMINDER_SNOOZE_MINUTES: int = Field(
+        default=30,
+        description="Minutes a reminder's Snooze button postpones the task by",
+    )
     INTERVENTION_TIMEOUT_SECONDS: float = Field(
         default=30.0,
         description="Wall-clock timeout in seconds for the conversation-path intervention LLM call",

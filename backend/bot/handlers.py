@@ -28,7 +28,7 @@ from backend.bot import state as state_module
 from backend.bot import textfmt
 from backend.config.settings import settings
 from backend.database import AsyncSessionLocal
-from backend.models.models import ConversationSession, KnowledgeRecord, User
+from backend.models.models import ConversationSession, KnowledgeRecord, Task, User
 from backend.services import actions as actions_service
 from backend.services import audio as audio_service
 from backend.services import orchestrator
@@ -52,6 +52,10 @@ UNKNOWN_COMMAND = "That command is not available yet."
 GENERIC_ERROR = "Something went wrong. Please try again."
 EXTRACTION_FAILED = "I couldn't process that note for saving. You can send it again."
 NEW_SESSION = "New session started."
+QUIET_OFF_TEXT = "Reminders are off. Send /quiet to turn them back on."
+QUIET_ON_TEXT = "Reminders are on."
+REMINDER_DONE_TEXT = "Marked done ✅"
+REMINDER_SNOOZE_TEXT = "Snoozed for {0} minutes ⏰"
 
 MAX_INLINE_RECORDS = 3
 CALLBACK_DATA_MAX_BYTES = 64
@@ -481,6 +485,24 @@ async def on_newsession(update: Any, context: Any, state: Any = None) -> None:
 
 
 @guarded
+async def cmd_quiet(update: Any, context: Any, state: Any = None) -> None:
+    if not _is_private(update):
+        return
+    chat_id = update.effective_chat.id
+    async with AsyncSessionLocal() as session:
+        user = await _user_by_chat(session, chat_id)
+        if user is None:
+            await context.bot.send_message(chat_id=chat_id, text=SIGNUP_PROMPT)
+            return
+        new_value = not user.quiet_mode
+        await actions_service.set_quiet_mode(session, user, new_value)
+
+    await context.bot.send_message(
+        chat_id=chat_id, text=QUIET_OFF_TEXT if new_value else QUIET_ON_TEXT
+    )
+
+
+@guarded
 async def on_other_command(update: Any, context: Any, state: Any = None) -> None:
     if not _is_private(update):
         return
@@ -587,6 +609,52 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
             await _replace_message(
                 context, chat_id, message_id, _DISCARDED if deleted else NOT_AVAILABLE
             )
+            return
+
+        if data.startswith("rm:done:"):
+            task_id = _to_int(data[len("rm:done:"):])
+            task = None
+            if task_id is not None:
+                try:
+                    task = await actions_service.mark_task_done(session, user, task_id)
+                except actions_service.NotFoundError:
+                    task = None
+            await _replace_message(
+                context, chat_id, message_id, REMINDER_DONE_TEXT if task is not None else NOT_AVAILABLE
+            )
+            return
+
+        if data.startswith("rm:snz:"):
+            task_id = _to_int(data[len("rm:snz:"):])
+            task = None
+            if task_id is not None:
+                try:
+                    task = await actions_service.snooze_task(
+                        session, user, task_id, minutes=settings.REMINDER_SNOOZE_MINUTES
+                    )
+                except actions_service.NotFoundError:
+                    task = None
+            await _replace_message(
+                context,
+                chat_id,
+                message_id,
+                REMINDER_SNOOZE_TEXT.format(settings.REMINDER_SNOOZE_MINUTES)
+                if task is not None
+                else NOT_AVAILABLE,
+            )
+            return
+
+        if data.startswith("rm:quiet:"):
+            task_id = _to_int(data[len("rm:quiet:"):])
+            owned = False
+            if task_id is not None:
+                stmt = select(Task).where(Task.id == task_id, Task.user_id == user.id)
+                owned = (await session.execute(stmt)).scalar_one_or_none() is not None
+            if owned:
+                await actions_service.set_quiet_mode(session, user, True)
+                await _replace_message(context, chat_id, message_id, QUIET_OFF_TEXT)
+            else:
+                await _replace_message(context, chat_id, message_id, NOT_AVAILABLE)
             return
 
         await _replace_message(context, chat_id, message_id, NOT_AVAILABLE)

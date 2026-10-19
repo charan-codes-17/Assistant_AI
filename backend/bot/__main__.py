@@ -40,7 +40,9 @@ def main() -> None:
         filters,
     )
 
+    from backend.bot import scheduler as scheduler_module
     from backend.bot.handlers import (
+        cmd_quiet,
         cmd_start,
         on_callback,
         on_error,
@@ -55,8 +57,16 @@ def main() -> None:
             "INVITE_CODES is empty: nobody can sign up via /start <code>."
         )
 
-    async def warmup_whisper(application) -> None:
-        """Load the Whisper model once at startup without blocking the event loop."""
+    async def post_init(application) -> None:
+        """Start the reminder scheduler FIRST, then warm up Whisper without blocking.
+
+        The scheduler is deterministic (no LLM / embedding calls). Starting it before the
+        warm-up means a Whisper failure can never stop reminders from being delivered.
+        """
+        task = asyncio.create_task(scheduler_module.scheduler_loop(application.bot))
+        application.bot_data["reminder_task"] = task
+        logging.getLogger(__name__).info("Reminder scheduler started")
+
         from backend.services import audio as audio_service
 
         try:
@@ -67,15 +77,27 @@ def main() -> None:
                 "Whisper warm-up failed; voice notes will return an error until it succeeds."
             )
 
+    async def post_shutdown(application) -> None:
+        """Cancel the reminder scheduler task cleanly."""
+        task = application.bot_data.get("reminder_task")
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
     application = (
         Application.builder()
         .token(settings.TELEGRAM_BOT_TOKEN)
         .concurrent_updates(True)
-        .post_init(warmup_whisper)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("newsession", on_newsession))
+    application.add_handler(CommandHandler("quiet", cmd_quiet))
     application.add_handler(CallbackQueryHandler(on_callback))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
