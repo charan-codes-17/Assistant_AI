@@ -53,6 +53,33 @@ class SessionNewResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Auth (/auth/login, /auth/logout)
+# ---------------------------------------------------------------------------
+
+AUTH_USERNAME_MAX = 100
+AUTH_PASSWORD_MAX = 128
+
+
+class LoginRequest(BaseModel):
+    """Login body with hard caps. The password is never echoed back or logged."""
+
+    username: str = Field(min_length=1, max_length=AUTH_USERNAME_MAX)
+    password: str = Field(min_length=1, max_length=AUTH_PASSWORD_MAX)
+
+
+class LoginResponse(BaseModel):
+    """Login success body. Never contains the JWT or the stored password hash."""
+
+    ok: bool
+    user_id: int
+    username: str | None = None
+
+
+class LogoutResponse(BaseModel):
+    ok: bool
+
+
+# ---------------------------------------------------------------------------
 # Identity (/me)
 # ---------------------------------------------------------------------------
 

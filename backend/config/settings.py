@@ -181,6 +181,12 @@ class Settings(BaseSettings):
 
     # Auth (needed from Phase 7; no insecure default)
     JWT_SECRET: str = Field(default="", description="Required in Phase 7")
+    JWT_EXPIRE_MINUTES: int = Field(
+        default=720, description="JWT lifetime in minutes (default 12 hours)"
+    )
+    AUTH_COOKIE_NAME: str = Field(
+        default="session", description="Name of the httpOnly auth cookie"
+    )
 
     model_config = SettingsConfigDict(
         env_file=str(ROOT_DIR / ".env"),

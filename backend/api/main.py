@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from backend.api.followups import store
+from backend.api.routes_auth import router as auth_router
 from backend.api.routes_chat import router as chat_router
 from backend.api.routes_me import router as me_router
 from backend.api.routes_memory import router as memory_router
@@ -33,6 +34,7 @@ from backend.api.routes_session import router as session_router
 from backend.api.schemas import HealthResponse
 from backend.config.settings import settings
 from backend.database import AsyncSessionLocal
+from backend.services.auth import auth_configured
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,12 @@ _DOCS_ENABLED = settings.APP_ENV == "development"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan. Startup is a no-op; shutdown cancels postprocess tasks."""
+    """Application lifespan. Startup logs auth readiness; shutdown cancels postprocess tasks."""
+    if not auth_configured():
+        logger.error(
+            "AUTH DISABLED: APP_ENV=production but JWT_SECRET is missing or shorter than 32 "
+            "characters. /auth/login will return 503 and every session cookie will be rejected."
+        )
     yield
     await store.aclose()
 
@@ -97,6 +104,7 @@ async def health() -> HealthResponse | JSONResponse:
     return HealthResponse(status="ok", db=True, pgvector=pgvector_ok, time=now)
 
 
+app.include_router(auth_router)
 app.include_router(session_router)
 app.include_router(me_router)
 app.include_router(chat_router)

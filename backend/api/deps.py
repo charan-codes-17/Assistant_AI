@@ -15,12 +15,13 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 import logging
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config.settings import settings
 from backend.database import AsyncSessionLocal
 from backend.models.models import User
+from backend.services.auth import decode_token
 
 logger = logging.getLogger(__name__)
 
@@ -50,19 +51,38 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def get_current_user(
+    request: Request,
     x_dev_user_id: str | None = Header(default=None, alias="X-Dev-User-Id"),
 ) -> CurrentUser:
-    """Interim identity seam for development only.
+    """Identity: the auth cookie first; the header seam second (development only).
 
     ################################################################################
-    # LOUD WARNING: DEVELOPER SEAM - DO NOT DEPLOY.                                 #
-    # Phase 7 replaces this with real JWT auth. Until then this trusts the raw       #
-    # X-Dev-User-Id header and only works when settings.APP_ENV == "development";    #
-    # in any other environment (or with a missing / non-integer / unknown header)    #
-    # every request is rejected with an identical 401. The user id is NEVER taken    #
-    # from the request body, query string, or path.                                  #
+    # 1. If the auth cookie is present it decides the outcome by itself: a valid JWT  #
+    #    loads the User from the DB (missing row -> 401); anything else (expired,      #
+    #    tampered, alg none, missing sub, weak production secret) is a 401. The        #
+    #    X-Dev-User-Id header is NOT consulted when a cookie is present.               #
+    # 2. With NO cookie, the X-Dev-User-Id header is honoured ONLY when                #
+    #    settings.APP_ENV == "development". In production it is ignored even if        #
+    #    present and valid.                                                            #
+    # Every rejection keeps the identical 401 body.                                    #
     ################################################################################
     """
+    token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if token:
+        user_id = decode_token(token)
+        if user_id is None:
+            raise _unauthorized()
+        async with AsyncSessionLocal() as session:
+            user = await session.get(User, user_id)
+            if user is None:
+                raise _unauthorized()
+            return CurrentUser(
+                user_id=user.id,
+                timezone=user.timezone or "Asia/Kolkata",
+                quiet_mode=bool(user.quiet_mode),
+            )
+
+    # No cookie: development-only header seam.
     if settings.APP_ENV != "development":
         raise _unauthorized()
     if x_dev_user_id is None:
