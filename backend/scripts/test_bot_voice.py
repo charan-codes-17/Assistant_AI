@@ -588,12 +588,31 @@ async def v9() -> dict:
     tmp_after = _temp_listing()
     repo_after = _repo_audio_files()
 
+    added = sorted(tmp_after - tmp_before)
+    removed = sorted(tmp_before - tmp_after)
+    new_repo = sorted(repo_after - repo_before)
     tmp_same = tmp_before == tmp_after
-    new_repo = repo_after - repo_before
     ok = tmp_same and not new_repo
+    if not ok:
+        tmp_dir = tempfile.gettempdir()
+        print("    [V9 DIAG] .ogg names in the OS temp dir that changed across the turn")
+        print(f"        temp_dir={tmp_dir}")
+        print(f"        added={added}")
+        print(f"        removed={removed}")
+        for name in added:
+            full = os.path.join(tmp_dir, name)
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                size = None
+            print(f"        added still on disk? {name}: exists={os.path.exists(full)}, size={size}")
+        if new_repo:
+            print(f"        new repo audio: {new_repo}")
+            still = [p for p in new_repo if os.path.exists(p)]
+            print(f"        new repo audio still on disk? {still}")
     return row("V9", "no audio persisted",
                "temp dir listing unchanged; no new audio file under the repo",
-               f"tmp_same={tmp_same}, new_repo_audio={sorted(new_repo)}", ok)
+               f"tmp_same={tmp_same}, added={added}, removed={removed}, new_repo_audio={new_repo}", ok)
 
 
 # ---------------------------------------------------------------------------
