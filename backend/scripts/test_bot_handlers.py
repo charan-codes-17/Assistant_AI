@@ -322,10 +322,10 @@ async def b1() -> dict:
     ok = (
         uid is not None and uid2 == uid and count == 1
         and "Welcome back" in second
-        and "/forget" not in welcome
+        and "/forget" in welcome
     )
     return row("B1", "/start valid code + welcome back",
-               "1 user row; 2nd start = welcome back; no /forget",
+               "1 user row; 2nd start = welcome back; banner mentions /forget",
                f"user_id={uid}, rows={count}, second={second!r}, banner_has_forget={'/forget' in welcome}",
                ok, f"welcome={welcome[:60]!r}")
 

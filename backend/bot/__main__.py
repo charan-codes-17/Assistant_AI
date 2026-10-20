@@ -42,6 +42,9 @@ def main() -> None:
 
     from backend.bot import scheduler as scheduler_module
     from backend.bot.handlers import (
+        cmd_forget,
+        cmd_help,
+        cmd_memory,
         cmd_quiet,
         cmd_start,
         on_callback,
@@ -98,6 +101,9 @@ def main() -> None:
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("newsession", on_newsession))
     application.add_handler(CommandHandler("quiet", cmd_quiet))
+    application.add_handler(CommandHandler("help", cmd_help))
+    application.add_handler(CommandHandler("memory", cmd_memory))
+    application.add_handler(CommandHandler("forget", cmd_forget))
     application.add_handler(CallbackQueryHandler(on_callback))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

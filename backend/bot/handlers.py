@@ -16,11 +16,12 @@ import asyncio
 import hmac
 import logging
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -31,6 +32,8 @@ from backend.database import AsyncSessionLocal
 from backend.models.models import ConversationSession, KnowledgeRecord, Task, User
 from backend.services import actions as actions_service
 from backend.services import audio as audio_service
+from backend.services import embeddings as embeddings_service
+from backend.services import memory_search
 from backend.services import orchestrator
 
 logger = logging.getLogger(__name__)
@@ -38,7 +41,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Fixed user-facing strings
 # ---------------------------------------------------------------------------
-WELCOME_BANNER = "Demo only: please don't send real personal data."
+WELCOME_BANNER = (
+    "Demo only: please don't send real personal data. "
+    "Send /forget any time to delete everything."
+)
 WELCOME = f"You're signed up. Send me a message and I'll help.\n\n{WELCOME_BANNER}"
 WELCOME_BACK = "Welcome back."
 SIGNUP_PROMPT = "Please send /start <invite code> to begin."
@@ -56,6 +62,28 @@ QUIET_OFF_TEXT = "Reminders are off. Send /quiet to turn them back on."
 QUIET_ON_TEXT = "Reminders are on."
 REMINDER_DONE_TEXT = "Marked done ✅"
 REMINDER_SNOOZE_TEXT = "Snoozed for {0} minutes ⏰"
+HELP_TEXT = (
+    "Available commands:\n"
+    "/start <invite code> - sign up\n"
+    "/newsession - start a new conversation session\n"
+    "/quiet - turn reminders on or off\n"
+    "/memory <topic> - search your saved memories\n"
+    "/forget - delete everything and your account\n"
+    "/help - show this list"
+)
+MEMORY_EMPTY = "I don't have anything saved about that yet."
+MEMORY_DELETE_PROMPT = "Delete this memory? {0}"
+MEMORY_DELETED = "Deleted."
+CANCELLED = "Cancelled."
+FORGET_WARNING = (
+    "This will permanently delete all your memories, tasks and your account. "
+    "This cannot be undone."
+)
+FORGET_CONFIRM = "Are you sure? Everything will be deleted."
+FORGET_EXPIRED = "That request expired. Send /forget again."
+FORGET_DONE = "Everything has been deleted. Send /start <invite code> to begin again."
+FORGET_NONCE_TTL_SECONDS = 120
+MEMORY_PREVIEW_CHARS = 100
 
 MAX_INLINE_RECORDS = 3
 CALLBACK_DATA_MAX_BYTES = 64
@@ -134,13 +162,25 @@ def _format_due(due: Optional[datetime], tz_key: str) -> str:
     return f"{local.strftime('%Y-%m-%d %H:%M')} {local.tzname()} ({tz_key})"
 
 
-async def _replace_message(context: Any, chat_id: int, message_id: int, text: str) -> None:
+async def _replace_message(
+    context: Any, chat_id: int, message_id: int, text: str, reply_markup: Any = None
+) -> None:
     try:
         await context.bot.edit_message_text(
-            chat_id=chat_id, message_id=message_id, text=text, reply_markup=None
+            chat_id=chat_id, message_id=message_id, text=text, reply_markup=reply_markup
         )
     except Exception:  # noqa: BLE001 - editing must never bubble up
         logger.exception("edit_message_text failed for chat_id=%s", chat_id)
+
+
+def _forget_now() -> float:
+    """Monotonic clock seam for the /forget nonce expiry (tests patch this)."""
+    return time.monotonic()
+
+
+def _memory_line(index: int, rec: Any) -> str:
+    date = textfmt._as_date(rec.created_at) or "unknown date"
+    return f"{index}. {rec.content} ({rec.kind}, {rec.certainty}, from {rec.source}, {date})"
 
 
 def guarded(fn):  # type: ignore[no-untyped-def]
@@ -502,6 +542,110 @@ async def cmd_quiet(update: Any, context: Any, state: Any = None) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# /help, /memory, /forget (Phase 4c-1)
+# ---------------------------------------------------------------------------
+@guarded
+async def cmd_help(update: Any, context: Any, state: Any = None) -> None:
+    if not _is_private(update):
+        return
+    chat_id = update.effective_chat.id
+    async with AsyncSessionLocal() as session:
+        user = await _user_by_chat(session, chat_id)
+    if user is None:
+        await context.bot.send_message(chat_id=chat_id, text=SIGNUP_PROMPT)
+        return
+    await context.bot.send_message(chat_id=chat_id, text=HELP_TEXT)
+
+
+async def _memory_results(session: Any, user: User, topic: str) -> list[KnowledgeRecord]:
+    """Confirmed, non-expired records for this user (newest first, at most 5)."""
+    if topic:
+        vectors = await embeddings_service.embed_texts(
+            [topic], timeout=settings.EMBEDDING_TIMEOUT_SECONDS
+        )
+        hits = await memory_search.search_confirmed(session, user.id, vectors[0], k=5)
+        return [rec for rec, _similarity in hits]
+
+    stmt = (
+        select(KnowledgeRecord)
+        .where(
+            KnowledgeRecord.user_id == user.id,
+            KnowledgeRecord.status == "confirmed",
+            KnowledgeRecord.superseded_by.is_(None),
+            or_(
+                KnowledgeRecord.expires_at.is_(None),
+                KnowledgeRecord.expires_at > func.now(),
+            ),
+        )
+        .order_by(KnowledgeRecord.created_at.desc(), KnowledgeRecord.id.desc())
+        .limit(5)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+@guarded
+async def cmd_memory(update: Any, context: Any, state: Any = None) -> None:
+    if not _is_private(update):
+        return
+    chat_id = update.effective_chat.id
+    raw = getattr(getattr(update, "message", None), "text", "") or ""
+    parts = raw.split(maxsplit=1)
+    topic = parts[1].strip() if len(parts) > 1 else ""
+
+    async with AsyncSessionLocal() as session:
+        user = await _user_by_chat(session, chat_id)
+        if user is None:
+            await context.bot.send_message(chat_id=chat_id, text=SIGNUP_PROMPT)
+            return
+        records = await _memory_results(session, user, topic)
+
+    # Privacy: ids and counts only, never the record content.
+    logger.info(
+        "memory list: chat_id=%s count=%s ids=%s",
+        chat_id,
+        len(records),
+        [rec.id for rec in records],
+    )
+
+    if not records:
+        await context.bot.send_message(chat_id=chat_id, text=MEMORY_EMPTY)
+        return
+
+    for index, rec in enumerate(records, start=1):
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🗑 Delete", callback_data=f"mem:del:{rec.id}")]]
+        )
+        await context.bot.send_message(
+            chat_id=chat_id, text=_memory_line(index, rec), reply_markup=keyboard
+        )
+
+
+@guarded
+async def cmd_forget(update: Any, context: Any, state: Any = None) -> None:
+    if not _is_private(update):
+        return
+    chat_id = update.effective_chat.id
+    async with AsyncSessionLocal() as session:
+        user = await _user_by_chat(session, chat_id)
+    if user is None:
+        await context.bot.send_message(chat_id=chat_id, text=SIGNUP_PROMPT)
+        return
+
+    st = state or _default_state(context)
+    chat = st.chat(chat_id)
+    chat.forget_nonce = None
+    chat.forget_expires_at = None
+
+    keyboard = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton("Continue", callback_data="fg:1"),
+            InlineKeyboardButton("Cancel", callback_data="fg:no"),
+        ]]
+    )
+    await context.bot.send_message(chat_id=chat_id, text=FORGET_WARNING, reply_markup=keyboard)
+
+
 @guarded
 async def on_other_command(update: Any, context: Any, state: Any = None) -> None:
     if not _is_private(update):
@@ -538,6 +682,8 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
         if user is None:
             await _replace_message(context, chat_id, message_id, NOT_AVAILABLE)
             return
+
+        chat_state = (state or _default_state(context)).chat(chat_id)
 
         if data.startswith("src:"):
             await _show_source(context, session, user, chat_id, data[len("src:"):])
@@ -655,6 +801,91 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
                 await _replace_message(context, chat_id, message_id, QUIET_OFF_TEXT)
             else:
                 await _replace_message(context, chat_id, message_id, NOT_AVAILABLE)
+            return
+
+        if data.startswith("mem:del:"):
+            record_id = _to_int(data[len("mem:del:"):])
+            record = None
+            if record_id is not None:
+                stmt = select(KnowledgeRecord).where(
+                    KnowledgeRecord.id == record_id,
+                    KnowledgeRecord.user_id == user.id,
+                )
+                record = (await session.execute(stmt)).scalar_one_or_none()
+            if record is None:
+                await _replace_message(context, chat_id, message_id, NOT_AVAILABLE)
+                return
+            keyboard = InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton("Yes, delete", callback_data=f"mem:yes:{record.id}"),
+                    InlineKeyboardButton("Cancel", callback_data=f"mem:no:{record.id}"),
+                ]]
+            )
+            await _replace_message(
+                context,
+                chat_id,
+                message_id,
+                MEMORY_DELETE_PROMPT.format(record.content[:MEMORY_PREVIEW_CHARS]),
+                reply_markup=keyboard,
+            )
+            return
+
+        if data.startswith("mem:no:"):
+            # Cancel: keep the record; nothing is deleted.
+            await _replace_message(context, chat_id, message_id, CANCELLED)
+            return
+
+        if data.startswith("mem:yes:"):
+            record_id = _to_int(data[len("mem:yes:"):])
+            deleted = False
+            if record_id is not None:
+                try:
+                    await actions_service.delete_record(session, user, record_id, confirmed=True)
+                    deleted = True
+                except actions_service.NotFoundError:
+                    deleted = False
+            await _replace_message(
+                context, chat_id, message_id, MEMORY_DELETED if deleted else NOT_AVAILABLE
+            )
+            return
+
+        if data == "fg:1":
+            nonce = uuid.uuid4().hex
+            chat_state.forget_nonce = nonce
+            chat_state.forget_expires_at = _forget_now() + FORGET_NONCE_TTL_SECONDS
+            keyboard = InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton("Yes, delete everything", callback_data=f"fg:2:{nonce}"),
+                    InlineKeyboardButton("Cancel", callback_data="fg:no"),
+                ]]
+            )
+            await _replace_message(
+                context, chat_id, message_id, FORGET_CONFIRM, reply_markup=keyboard
+            )
+            return
+
+        if data == "fg:no":
+            chat_state.forget_nonce = None
+            chat_state.forget_expires_at = None
+            await _replace_message(context, chat_id, message_id, CANCELLED)
+            return
+
+        if data.startswith("fg:2:"):
+            provided = data[len("fg:2:"):]
+            valid = (
+                chat_state.forget_nonce is not None
+                and chat_state.forget_expires_at is not None
+                and _forget_now() <= chat_state.forget_expires_at
+                and hmac.compare_digest(provided, chat_state.forget_nonce)
+            )
+            chat_state.forget_nonce = None
+            chat_state.forget_expires_at = None
+            if not valid:
+                await _replace_message(context, chat_id, message_id, FORGET_EXPIRED)
+                return
+            await actions_service.delete_user_account(session, user, confirmed=True)
+            chat_state.reset()
+            await _replace_message(context, chat_id, message_id, FORGET_DONE)
             return
 
         await _replace_message(context, chat_id, message_id, NOT_AVAILABLE)

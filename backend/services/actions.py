@@ -18,11 +18,20 @@ from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, List, Optional, Sequence, Tuple
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import AsyncSessionLocal
-from backend.models.models import KnowledgeRecord, Task, User
+from backend.models.models import (
+    ConversationSession,
+    Goal,
+    KnowledgeRecord,
+    LinkCode,
+    ProfileSummary,
+    Project,
+    Task,
+    User,
+)
 from backend.services.embeddings import embed_texts
 from backend.services.extraction import CandidateTask, confirm_task
 
@@ -515,6 +524,42 @@ async def set_quiet_mode(
     return user
 
 
+async def delete_user_account(
+    session: AsyncSession,
+    user: User,
+    *,
+    confirmed: bool,
+) -> None:
+    """Hard-delete the user row; every user-owned table cascades at the database level.
+
+    Requires explicit confirmed=True (two-step /forget guard). Logs only the user id and the
+    per-table row counts that were removed -- never any content.
+    """
+    if not confirmed:
+        raise PermissionError("delete_user_account requires confirmed=True")
+
+    user_id = user.id
+    counts: dict[str, int] = {}
+    for model in (
+        KnowledgeRecord,
+        Task,
+        Goal,
+        Project,
+        ConversationSession,
+        ProfileSummary,
+        LinkCode,
+    ):
+        counts[model.__tablename__] = (
+            await session.execute(
+                select(func.count()).select_from(model).where(model.user_id == user_id)
+            )
+        ).scalar_one()
+
+    await session.delete(user)
+    await session.commit()
+    logger.info("delete_user_account user_id=%s counts=%s", user_id, counts)
+
+
 __all__ = [
     "NotFoundError",
     "BatchConfirmResult",
@@ -530,6 +575,7 @@ __all__ = [
     "reschedule_task",
     "apply_directive",
     "set_quiet_mode",
+    "delete_user_account",
     "confirm_task",
     "confirm_task_candidate",
     "stage_task_candidates",

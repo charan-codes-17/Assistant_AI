@@ -24,7 +24,16 @@ class ChatState:
 
     history: list[dict[str, str]] = field(default_factory=list)
     session_id: int | None = None
+    forget_nonce: str | None = None
+    forget_expires_at: float | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    def reset(self) -> None:
+        """Drop all in-memory state for this chat (used when the account is deleted)."""
+        self.history.clear()
+        self.session_id = None
+        self.forget_nonce = None
+        self.forget_expires_at = None
 
 
 class BotState:
