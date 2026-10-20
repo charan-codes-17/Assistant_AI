@@ -89,6 +89,8 @@ CALLBACK_DATA_MAX_BYTES = 64
 SAVED_CONTENT_CHARS = 300
 BATCH_PREVIEW_LINES = 15
 BATCH_PREVIEW_CHARS = 80
+CONTRADICTION_HEADER = "Heads up: this may conflict with something you told me earlier: {0}."
+NOTICE_FIELD_CHARS = 200
 _SAVED = "Saved ✅"
 _DISCARDED = "Discarded ❌"
 
@@ -213,6 +215,39 @@ def _batch_preview(records: list[Any]) -> str:
     if extra > 0:
         lines.append(f"...and {extra} more")
     return "\n".join(lines)
+
+
+def contradiction_notice(decision: Any) -> Optional[str]:
+    """Plain-text contradiction notice, or None when nothing should be sent.
+
+    Deterministic: built in code from the intervention decision (no LLM call). A notice is sent
+    iff the engine flagged a contradiction with a target (contradiction=True AND conflicts_with
+    present), regardless of the action directive: contradiction=False and a missing
+    conflicts_with both send nothing. Every free-text field is truncated and markdown-stripped.
+    """
+    if not getattr(decision, "contradiction", False):
+        return None
+    ref = getattr(decision, "conflicts_with", None)
+    if ref is None:
+        return None
+
+    summary = getattr(decision, "contradiction_detail", None) or f"your earlier {ref.kind}"
+    lines = [CONTRADICTION_HEADER.format(textfmt.strip_markdown(summary)[:NOTICE_FIELD_CHARS])]
+    question = getattr(decision, "clarifying_question", None)
+    if question:
+        lines.append(textfmt.strip_markdown(question)[:NOTICE_FIELD_CHARS])
+    return "\n".join(lines)
+
+
+async def _send_contradiction_notice(context: Any, chat_id: int, decision: Any) -> None:
+    """Send the notice (if any) before the confirm prompts; a failure never breaks the turn."""
+    notice = contradiction_notice(decision)
+    if not notice:
+        return
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=notice)
+    except Exception as exc:  # noqa: BLE001 - best-effort; log exception class only, no content
+        logger.warning("contradiction notice send failed: %s", type(exc).__name__)
 
 
 def guarded(fn):  # type: ignore[no-untyped-def]
@@ -355,8 +390,23 @@ async def _postprocess_and_prompt(
         logger.exception("postprocess failed for chat_id=%s", chat_id)
         return
 
-    # Intervention is surfaced in the reply path only in a later phase; logging is all we do now.
-    logger.info("intervention: %s", post.intervention.model_dump())
+    # Intervention is logged as flags/ids only (never memory content). The contradiction notice is
+    # the only user-facing part; it is sent right after the reply and before the confirm prompts.
+    decision = post.intervention
+    logger.info(
+        "intervention: action=%s contradiction=%s conflicts_with=%s target_task_id=%s "
+        "surfaced_record_id=%s",
+        decision.action,
+        decision.contradiction,
+        (
+            f"{decision.conflicts_with.kind}:{decision.conflicts_with.id}"
+            if decision.conflicts_with
+            else None
+        ),
+        decision.target_task_id,
+        decision.surfaced_record_id,
+    )
+    await _send_contradiction_notice(context, chat_id, decision)
 
     if post.extraction_failed:
         await context.bot.send_message(chat_id=chat_id, text=EXTRACTION_FAILED)
