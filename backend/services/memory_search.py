@@ -30,6 +30,7 @@ async def search_confirmed(
         KnowledgeRecord.user_id == user_id,
         KnowledgeRecord.status == "confirmed",
         KnowledgeRecord.superseded_by.is_(None),
+        KnowledgeRecord.embedding.is_not(None),
         or_(
             KnowledgeRecord.expires_at.is_(None),
             KnowledgeRecord.expires_at > func.now(),

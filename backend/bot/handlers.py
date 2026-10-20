@@ -61,7 +61,6 @@ NEW_SESSION = "New session started."
 QUIET_OFF_TEXT = "Reminders are off. Send /quiet to turn them back on."
 QUIET_ON_TEXT = "Reminders are on."
 REMINDER_DONE_TEXT = "Marked done ✅"
-REMINDER_SNOOZE_TEXT = "Snoozed for {0} minutes ⏰"
 HELP_TEXT = (
     "Available commands:\n"
     "/start <invite code> - sign up\n"
@@ -87,6 +86,9 @@ MEMORY_PREVIEW_CHARS = 100
 
 MAX_INLINE_RECORDS = 3
 CALLBACK_DATA_MAX_BYTES = 64
+SAVED_CONTENT_CHARS = 300
+BATCH_PREVIEW_LINES = 15
+BATCH_PREVIEW_CHARS = 80
 _SAVED = "Saved ✅"
 _DISCARDED = "Discarded ❌"
 
@@ -181,6 +183,36 @@ def _forget_now() -> float:
 def _memory_line(index: int, rec: Any) -> str:
     date = textfmt._as_date(rec.created_at) or "unknown date"
     return f"{index}. {rec.content} ({rec.kind}, {rec.certainty}, from {rec.source}, {date})"
+
+
+def snooze_text(minutes: int) -> str:
+    """Snooze confirmation, singular for exactly one minute."""
+    unit = "minute" if minutes == 1 else "minutes"
+    return f"Snoozed for {minutes} {unit} ⏰"
+
+
+def _saved_record_text(record: Any) -> str:
+    """Keep what was saved: the record content (bounded) under the Saved header."""
+    return f"{_SAVED}\n{record.content[:SAVED_CONTENT_CHARS]}"
+
+
+def _saved_task_text(task: Any, user: User) -> str:
+    """Keep what was saved: the task title and its due time, same format as the prompt."""
+    tz_key = user.timezone or "UTC"
+    if task.due_at is None:
+        return f"{_SAVED}\n{task.title} (no due date)"
+    return f"{_SAVED}\n{task.title}, due {_format_due(task.due_at, tz_key)}"
+
+
+def _batch_preview(records: list[Any]) -> str:
+    """Header + up to BATCH_PREVIEW_LINES numbered items, then '...and K more'."""
+    lines = [f"{len(records)} memories to review:"]
+    for index, rec in enumerate(records[:BATCH_PREVIEW_LINES], start=1):
+        lines.append(f"{index}. {rec.content[:BATCH_PREVIEW_CHARS]}")
+    extra = len(records) - BATCH_PREVIEW_LINES
+    if extra > 0:
+        lines.append(f"...and {extra} more")
+    return "\n".join(lines)
 
 
 def guarded(fn):  # type: ignore[no-untyped-def]
@@ -371,7 +403,7 @@ async def _prompt_records(context: Any, chat_id: int, records: list[Any], st: An
     )
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"{len(records)} memories to review",
+        text=_batch_preview(records),
         reply_markup=keyboard,
     )
 
@@ -697,7 +729,10 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
                 else None
             )
             await _replace_message(
-                context, chat_id, message_id, _SAVED if record is not None else NOT_AVAILABLE
+                context,
+                chat_id,
+                message_id,
+                _saved_record_text(record) if record is not None else NOT_AVAILABLE,
             )
             return
 
@@ -716,9 +751,12 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
         if data.startswith("rec:allok:"):
             ids = _resolve_batch_ids(state or _default_state(context), data[len("rec:allok:"):])
             result = await actions_service.confirm_records(user.id, ids) if ids else None
-            confirmed = bool(result and result.confirmed_records)
+            count = len(result.confirmed_records) if result else 0
             await _replace_message(
-                context, chat_id, message_id, _SAVED if confirmed else NOT_AVAILABLE
+                context,
+                chat_id,
+                message_id,
+                f"Saved {count} memories ✅" if count else NOT_AVAILABLE,
             )
             return
 
@@ -741,7 +779,10 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
                 else None
             )
             await _replace_message(
-                context, chat_id, message_id, _SAVED if task is not None else NOT_AVAILABLE
+                context,
+                chat_id,
+                message_id,
+                _saved_task_text(task, user) if task is not None else NOT_AVAILABLE,
             )
             return
 
@@ -784,7 +825,7 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
                 context,
                 chat_id,
                 message_id,
-                REMINDER_SNOOZE_TEXT.format(settings.REMINDER_SNOOZE_MINUTES)
+                snooze_text(settings.REMINDER_SNOOZE_MINUTES)
                 if task is not None
                 else NOT_AVAILABLE,
             )

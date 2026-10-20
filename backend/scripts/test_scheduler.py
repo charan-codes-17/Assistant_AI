@@ -439,7 +439,7 @@ async def s7(session, results) -> None:
         ctx_s, state=st_s,
     )
     t_snz = await get_task(session, t_snz.id)
-    snooze_edit = any(e["text"] == handlers.REMINDER_SNOOZE_TEXT.format(settings.REMINDER_SNOOZE_MINUTES)
+    snooze_edit = any(e["text"] == handlers.snooze_text(settings.REMINDER_SNOOZE_MINUTES)
                       for e in bot_s.edits)
     snoozed_ok = (
         t_snz.status == "snoozed"
@@ -458,6 +458,20 @@ async def s7(session, results) -> None:
     details.append(
         f"snooze: snoozed_ok={snoozed_ok}, resend={resend}, reopened={reopened}"
     )
+
+    # --- rm:snz singular wording when REMINDER_SNOOZE_MINUTES == 1 ---
+    chat_snz1 = 970017
+    u_snz1 = await make_user(session, chat_snz1)
+    t_snz1 = await make_task(session, u_snz1, "S7 snooze one", due_at=NOW + timedelta(minutes=30))
+    bot_s1, ctx_s1, st_s1 = make_env()
+    with unittest.mock.patch.object(settings, "REMINDER_SNOOZE_MINUTES", 1):
+        await handlers.on_callback(
+            FakeUpdate(chat_snz1, callback=FakeCallbackQuery(chat_snz1, f"rm:snz:{t_snz1.id}")),
+            ctx_s1, state=st_s1,
+        )
+    singular_edit = any(e["text"] == "Snoozed for 1 minute ⏰" for e in bot_s1.edits)
+    oks.append(singular_edit)
+    details.append(f"singular (N=1): edit={singular_edit}")
 
     # --- rm:quiet ---
     chat_q = 970009
@@ -504,7 +518,7 @@ async def s7(session, results) -> None:
 
     ok = all(oks)
     add(results, "S7", "rm:done / rm:snz / rm:quiet callbacks + ownership",
-        ok, "done->done; snz->snoozed then reopen; quiet->quiet; other's id->not available",
+        ok, "done->done; snz->snoozed then reopen (N=1 -> 'Snoozed for 1 minute'); quiet->quiet; other's id->not available",
         "; ".join(details))
 
 

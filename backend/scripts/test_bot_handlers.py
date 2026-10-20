@@ -471,7 +471,7 @@ async def b6() -> dict:
         await drain(st)
         await press(bot, ctx, st, chat_a, f"rec:ok:{rec1}")
         s1 = await db_record_status(rec1)
-        saved_edit = any(e["text"] == "Saved ✅" for e in bot.edits)
+        saved_edit = any(e["text"] == "Saved ✅\nrecord one" for e in bot.edits)
         await press(bot, ctx, st, chat_a, f"rec:ok:{rec1}")  # idempotent
         s1b = await db_record_status(rec1)
         await press(bot, ctx, st, chat_a, f"rec:no:{rec2}")
@@ -526,6 +526,10 @@ async def b7() -> dict:
         if t_first is not None:
             await press(bot2, ctx2, ctx2.bot_data["state"], chat_a, f"tk:ok:{t_first}")
         s_first = await db_task_status(t_first) if t_first else None
+        saved_task_edit = any(
+            e["text"] == "Saved ✅\nSend Arun the PDF, due 2026-10-25 09:00 IST (Asia/Kolkata)"
+            for e in bot2.edits
+        )
         if t_second is not None:
             await press(bot2, ctx2, ctx2.bot_data["state"], chat_a, f"tk:no:{t_second}")
         s_second = await db_task_status(t_second) if t_second else None
@@ -539,13 +543,14 @@ async def b7() -> dict:
         len(pending) == 2 and len(promise_msgs) == 2
         and s_first == "open" and s_second == "MISSING"
         and s_third == "pending" and b_edit == "That item is no longer available"
+        and saved_task_edit
     )
     due_msg = next((m["text"] for m in promise_msgs if "Send Arun" in m["text"]), "")
     return row("B7", "task stage -> confirm/discard (restart)",
-               "2 pending rows+messages; ok->open; no->deleted; B blocked",
+               "2 pending rows+messages; ok->open (Saved keeps title+due); no->deleted; B blocked",
                f"pending={len(pending)}, msgs={len(promise_msgs)}, first={s_first}, second={s_second}, "
                f"third={s_third}, B_edit={b_edit!r}",
-               ok, f"due_msg={due_msg!r}")
+               ok, f"due_msg={due_msg!r}, saved_task_edit={saved_task_edit}")
 
 
 # ---------------------------------------------------------------------------
@@ -573,27 +578,30 @@ async def b8() -> dict:
     with mock_orchestrator(respond, postprocess):
         await send_text(bot, ctx, st, chat_a, "four notes")
         await drain(st)
-        batch_msgs = [m for m in bot.sent if m["text"] == "4 memories to review"]
-        single_msgs = [m for m in bot.sent if m["text"].startswith("Save this memory?")]
+        batch_msgs = [m for m in bot.sent if (m["text"] or "").startswith("4 memories to review:")]
+        single_msgs = [m for m in bot.sent if (m["text"] or "").startswith("Save this memory?")]
+        batch_text = batch_msgs[0]["text"] if batch_msgs else ""
+        # the batch message lists each item, showing the first 80 chars of its content
+        lists_all = bool(batch_text) and all(f"batch record {i}" in batch_text for i in range(4))
         # press Save all, tampered csv to include another user's id (ownership must hold)
         csv = ",".join(str(r) for r in recs + [rec_c])
         await press(bot, ctx, st, chat_a, f"rec:allok:{csv}")
         statuses = [await db_record_status(r) for r in recs]
         status_c = await db_record_status(rec_c)
-        saved_edit = any(e["text"] == "Saved ✅" for e in bot.edits)
+        saved_edit = any(e["text"] == "Saved 4 memories ✅" for e in bot.edits)
 
     cbs = all_callbacks(bot)
     max_cb = max((len(c.encode("utf-8")) for c in cbs), default=0)
     ok = (
-        len(batch_msgs) == 1 and len(single_msgs) == 0
+        len(batch_msgs) == 1 and len(single_msgs) == 0 and lists_all
         and all(s == "confirmed" for s in statuses) and status_c == "pending" and saved_edit
         and max_cb <= 64
     )
     return row("B8", "batch records + owned-only + cb<=64",
-               "1 batch msg; 4 confirmed; C untouched; all cb<=64 bytes",
-               f"batch_msgs={len(batch_msgs)}, single={len(single_msgs)}, statuses={statuses}, "
-               f"C={status_c}, max_cb_bytes={max_cb}",
-               ok, f"saved_edit={saved_edit}")
+               "1 batch msg listing all 4; 4 confirmed; C untouched; all cb<=64 bytes",
+               f"batch_msgs={len(batch_msgs)}, single={len(single_msgs)}, lists_all={lists_all}, "
+               f"statuses={statuses}, C={status_c}, max_cb_bytes={max_cb}",
+               ok, f"saved_edit={saved_edit}, batch_text={batch_text!r}")
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ The real dev DB is used with synthetic users whose telegram_chat_id is in 980000
 users are purged at the START and again in a finally block. Embeddings are faked (deterministic,
 zero network) except where a test explicitly blocks them. No LLM call is ever allowed here.
 
-C1-C12 assert exact expectations; the process exits non-zero on any failure and prints the exit
+C1-C13 assert exact expectations; the process exits non-zero on any failure and prints the exit
 code on the final EXIT line (added by the caller).
 
 Run:
@@ -303,6 +303,24 @@ async def db_add_record_full(
         if created_at is not None:
             kwargs["created_at"] = created_at
         rec = KnowledgeRecord(**kwargs)
+        session.add(rec)
+        await session.commit()
+        await session.refresh(rec)
+        return rec.id
+
+
+async def db_add_record_without_embedding(user_id: int, content: str) -> int:
+    """Confirmed record with embedding=NULL (the C13 hardening case)."""
+    async with AsyncSessionLocal() as session:
+        rec = KnowledgeRecord(
+            user_id=user_id,
+            kind="knowledge",
+            content=content,
+            certainty="tentative",
+            source="text",
+            status="confirmed",
+            embedding=None,
+        )
         session.add(rec)
         await session.commit()
         await session.refresh(rec)
@@ -906,6 +924,32 @@ async def c12() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# C13: a confirmed record WITHOUT an embedding is skipped (search cannot crash)
+# ---------------------------------------------------------------------------
+async def c13() -> dict:
+    chat = next_chat()
+    uid = await db_add_user(chat)
+    await db_add_record_without_embedding(uid, "C13NOEMB no embedding")
+    await db_add_record_full(uid, "C13WITH embedding present", status="confirmed")
+    bot, ctx, st = make_env()
+    counter = [0]
+    with fake_embeddings(counter), block_llm():
+        await handlers.cmd_memory(FakeUpdate(chat, text="/memory anything"), ctx, state=st)
+
+    lines = memory_lines(bot, chat)
+    generic = any(m["text"] == handlers.GENERIC_ERROR for m in bot.sent)
+    only_with = len(lines) == 1 and "C13WITH" in lines[0]
+    no_null = all("C13NOEMB" not in ln for ln in lines)
+    ok = only_with and no_null and not generic
+    return row(
+        "C13", "/memory: NULL-embedding row skipped, no crash",
+        "only the record WITH an embedding is returned; NULL-embedding row hidden; no error",
+        f"lines={len(lines)}, only_with={only_with}, no_null={no_null}, generic={generic}",
+        ok, f"lines={lines}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 async def main() -> int:
@@ -922,7 +966,7 @@ async def main() -> int:
     print("=" * 140)
 
     results: list[dict] = []
-    cases = [c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12]
+    cases = [c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13]
     try:
         purged = await purge_synthetic()
         print(f"PURGE at start: removed {purged} synthetic user(s).\n")

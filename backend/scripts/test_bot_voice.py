@@ -591,14 +591,16 @@ async def v9() -> dict:
     added = sorted(tmp_after - tmp_before)
     removed = sorted(tmp_before - tmp_after)
     new_repo = sorted(repo_after - repo_before)
-    tmp_same = tmp_before == tmp_after
-    ok = tmp_same and not new_repo
+    # Narrowed check: this case only fails when IT leaves audio behind. Files that existed before
+    # the case and vanish are other code's cleanup (e.g. an earlier case's timed-out worker thread
+    # removing its own temp file), not persistence by this turn -- so `removed` is informational.
+    ok = not added and not new_repo
     if not ok:
         tmp_dir = tempfile.gettempdir()
         print("    [V9 DIAG] .ogg names in the OS temp dir that changed across the turn")
         print(f"        temp_dir={tmp_dir}")
         print(f"        added={added}")
-        print(f"        removed={removed}")
+        print(f"        removed={removed} (informational: files that vanished are not persistence)")
         for name in added:
             full = os.path.join(tmp_dir, name)
             try:
@@ -611,8 +613,8 @@ async def v9() -> dict:
             still = [p for p in new_repo if os.path.exists(p)]
             print(f"        new repo audio still on disk? {still}")
     return row("V9", "no audio persisted",
-               "temp dir listing unchanged; no new audio file under the repo",
-               f"tmp_same={tmp_same}, added={added}, removed={removed}, new_repo_audio={new_repo}", ok)
+               "no NEW .ogg in temp dir; no new audio file under the repo",
+               f"added={added}, new_repo_audio={new_repo}, removed(info)={removed}", ok)
 
 
 # ---------------------------------------------------------------------------
