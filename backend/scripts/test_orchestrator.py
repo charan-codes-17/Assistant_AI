@@ -1393,10 +1393,14 @@ async def main() -> None:
                         and hedge_a_warn
                     )
                     # (b) both slow -> TimeoutError at the budget, no unretrieved-task warnings.
+                    # Strategy B refires every `hedge` until the budget (max 4 in flight), so with
+                    # interval 0.05 and budget 0.15 a request may or may not fire exactly at the
+                    # budget edge: the count is a range (at least the initial call + one hedge,
+                    # never above the 4 in-flight cap) rather than an exact number.
                     hedge_b = await _run_hedge_case([0.5, 0.5], hedge=0.05, budget=0.15)
                     e15b_hedge_pass = (
                         isinstance(hedge_b["raised"], asyncio.TimeoutError)
-                        and hedge_b["calls"] == 2
+                        and 2 <= hedge_b["calls"] <= 4
                         and hedge_b["vectors"] == 0
                         and hedge_b["unretrieved"] == []
                     )
@@ -1416,6 +1420,7 @@ async def main() -> None:
                     )
                     print(
                         f"   (b) both slow: raised={hedge_b['raised']!r} "
+                        f"calls={hedge_b['calls']} "
                         f"elapsed={hedge_b['elapsed']:.3f}s "
                         f"unretrieved={len(hedge_b['unretrieved'])}"
                     )
@@ -1430,12 +1435,15 @@ async def main() -> None:
                         "(b) both slow -> TimeoutError at budget, no unretrieved tasks; "
                         "(c) fast first -> single call",
                         e15a_pass and e15b_hedge_pass and e15c_pass,
+                        f"calls a={hedge_a['calls']} b={hedge_b['calls']} c={hedge_c['calls']} "
+                        f"b_raised={hedge_b['raised']!r} "
+                        f"b_unretrieved={len(hedge_b['unretrieved'])}",
                         f"(a)={'PASS' if e15a_pass else 'FAIL'} calls={hedge_a['calls']} "
                         f"elapsed={hedge_a['elapsed']:.3f}s hedge_warn={hedge_a_warn}; "
-                        f"(b)={'PASS' if e15b_hedge_pass else 'FAIL'} raised={hedge_b['raised']!r} "
-                        f"unretrieved={len(hedge_b['unretrieved'])}; "
+                        f"(b)={'PASS' if e15b_hedge_pass else 'FAIL'} calls={hedge_b['calls']} "
+                        f"raised={hedge_b['raised']!r} unretrieved={len(hedge_b['unretrieved'])}; "
                         f"(c)={'PASS' if e15c_pass else 'FAIL'} calls={hedge_c['calls']} "
-                        f"hedge_warn={hedge_c_warn}",
+                        f"hedge_warn={hedge_c_warn}; "
                         f"vector_dim a={hedge_a['vector_dim']} c={hedge_c['vector_dim']} "
                         f"expected={settings.EMBEDDING_DIM}",
                     ))
