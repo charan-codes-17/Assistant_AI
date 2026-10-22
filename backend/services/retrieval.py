@@ -11,6 +11,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+import openai
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config.settings import settings
@@ -187,11 +188,18 @@ async def retrieve_memory(
             query_embeddings = await embed_texts(
                 [query], timeout=settings.EMBEDDING_TIMEOUT_SECONDS
             )
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, openai.APIError) as exc:
+            # asyncio.TimeoutError: the embedding budget was exhausted.
+            # openai.APIError (429/5xx/connection): every hedge attempt failed.
+            reason = (
+                f"budget {settings.EMBEDDING_TIMEOUT_SECONDS:.2f}s exhausted"
+                if isinstance(exc, asyncio.TimeoutError)
+                else type(exc).__name__
+            )
             logger.warning(
-                "Query embedding failed (budget %.2fs exhausted) for user_id=%s; "
+                "Query embedding failed (%s) for user_id=%s; "
                 "replying without memory (embedding_failed).",
-                settings.EMBEDDING_TIMEOUT_SECONDS,
+                reason,
                 user.id,
             )
             return RetrievalResult(

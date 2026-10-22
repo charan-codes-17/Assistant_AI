@@ -61,49 +61,75 @@ async def _embed_batch(texts: list[str]) -> Any:
 
 
 async def _embed_query_hedged(texts: list[str], budget: float) -> Any:
-    """Query path: hedge with a second identical request if the first is slow.
+    """Query path: strategy-B hedging -- fire a new identical request every
+    settings.EMBEDDING_HEDGE_SECONDS (default 0.8s) up to
+    settings.EMBEDDING_HEDGE_MAX_IN_FLIGHT (default 4) requests in total, return on the FIRST
+    success and cancel the remaining in-flight requests.
 
-    Starts one request; if it has produced no result after settings.EMBEDDING_HEDGE_SECONDS
-    a second identical request is started concurrently and whichever finishes first wins; the
-    loser is cancelled (its exception is always consumed so there are no "task exception never
-    retrieved" warnings). The whole call is bounded by `budget` (EMBEDDING_TIMEOUT_SECONDS);
-    if that budget is exhausted an asyncio.TimeoutError is raised so retrieval's fail-open
-    applies. A WARNING is logged when the hedge fires and when the budget is exhausted.
+    The whole call is bounded by `budget` (EMBEDDING_TIMEOUT_SECONDS). A request that raises
+    (e.g. 429/5xx) does not abort the call while attempts and budget remain; the last error is
+    re-raised only once every attempt has failed. When the budget is exhausted an
+    asyncio.TimeoutError is raised so retrieval's fail-open applies. Every still-running request
+    is cancelled and all results/exceptions are consumed (so asyncio never warns about a "task
+    exception never retrieved"). WARNINGs are logged when a hedge request fires and when the
+    call gives up; only ids/flags are logged, never memory text or keys.
     """
     loop = asyncio.get_running_loop()
-    hedge = settings.EMBEDDING_HEDGE_SECONDS
-    deadline = loop.time() + budget
+    interval = settings.EMBEDDING_HEDGE_SECONDS
+    max_attempts = settings.EMBEDDING_HEDGE_MAX_IN_FLIGHT
+    started = loop.time()
+    deadline = started + budget
+    next_fire = started
 
-    first = asyncio.ensure_future(_single_request(texts))
-    tasks: list[asyncio.Future] = [first]
+    tasks: list[asyncio.Future] = []
+    last_error: BaseException | None = None
     try:
-        first_wait = min(hedge, budget)
-        done, _ = await asyncio.wait({first}, timeout=first_wait)
-        if not done:
-            if loop.time() >= deadline:
+        while True:
+            now = loop.time()
+            if now >= deadline:
                 logger.warning(
                     "Query embedding budget of %.2fs exhausted; giving up", budget
                 )
                 raise asyncio.TimeoutError()
-            logger.warning(
-                "Query embedding produced no result after %.2fs; firing hedge request",
-                first_wait,
-            )
-            second = asyncio.ensure_future(_single_request(texts))
-            tasks.append(second)
-            remaining = deadline - loop.time()
+
+            if len(tasks) < max_attempts and now >= next_fire:
+                if any(not task.done() for task in tasks):
+                    logger.warning(
+                        "Query embedding produced no result after %.2fs; firing hedge request",
+                        round(now - started, 2),
+                    )
+                tasks.append(asyncio.ensure_future(_single_request(texts)))
+                next_fire += interval
+
+            pending = [task for task in tasks if not task.done()]
+            if not pending:
+                if len(tasks) < max_attempts:
+                    # Every attempt so far failed (or none fired yet): wait for the next
+                    # scheduled attempt instead of giving up early.
+                    await asyncio.sleep(max(min(deadline - now, next_fire - now), 0.001))
+                    continue
+                if last_error is not None:
+                    logger.warning(
+                        "Query embedding: all %d attempts failed; giving up", len(tasks)
+                    )
+                    raise last_error
+                raise asyncio.TimeoutError()
+
+            if len(tasks) < max_attempts:
+                wait_for = max(min(deadline - now, next_fire - now), 0.001)
+            else:
+                wait_for = max(deadline - now, 0.001)
+
             done, _ = await asyncio.wait(
-                {first, second},
-                timeout=remaining,
-                return_when=asyncio.FIRST_COMPLETED,
+                pending, timeout=wait_for, return_when=asyncio.FIRST_COMPLETED
             )
-            if not done:
-                logger.warning(
-                    "Query embedding budget of %.2fs exhausted; giving up", budget
-                )
-                raise asyncio.TimeoutError()
-        winner = next(iter(done))
-        return winner.result()
+            for task in done:
+                if task.cancelled():
+                    continue
+                error = task.exception()
+                if error is None:
+                    return task.result()
+                last_error = error
     finally:
         for task in tasks:
             if not task.done():
@@ -119,12 +145,15 @@ async def embed_texts(
 
     Uses settings.EMBEDDING_MODEL and ALWAYS passes dimensions=settings.EMBEDDING_DIM.
     When `timeout` is given (the retrieval query path passes EMBEDDING_TIMEOUT_SECONDS) the
-    call is hedged: one request, plus a second identical request if the first is slow after
-    EMBEDDING_HEDGE_SECONDS; the total budget is `timeout`. When `timeout` is None (batch
-    path, e.g. extraction dedupe and edit_record) requests are sequential with one retry,
-    each bounded by EMBEDDING_BATCH_TIMEOUT_SECONDS.
-    Raises asyncio.TimeoutError when the budget is exhausted (callers apply fail-open) and
-    ValueError if any returned vector dimension does not match settings.EMBEDDING_DIM.
+    call is hedged (strategy B): a new identical request is fired every EMBEDDING_HEDGE_SECONDS
+    up to EMBEDDING_HEDGE_MAX_IN_FLIGHT requests, the first success wins and the rest are
+    cancelled; the total budget is `timeout`. A request that raises does not abort the call
+    while attempts and budget remain. When `timeout` is None (batch path, e.g. extraction dedupe
+    and edit_record) requests are sequential with one retry, each bounded by
+    EMBEDDING_BATCH_TIMEOUT_SECONDS.
+    Raises asyncio.TimeoutError when the budget is exhausted or every attempt has failed
+    (callers apply fail-open) and ValueError if any returned vector dimension does not match
+    settings.EMBEDDING_DIM.
     """
     if not texts:
         return []

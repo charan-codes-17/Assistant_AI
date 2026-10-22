@@ -33,19 +33,27 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = Field(description="Embedding model ID")
     EMBEDDING_DIM: int = Field(description="Vector dimension of EMBEDDING_MODEL")
     EMBEDDING_TIMEOUT_SECONDS: float = Field(
-        default=5.0,
+        default=6.0,
         description=(
             "Total wall-clock budget for the query embedding call in retrieval. The query path "
-            "hedges: one request, plus a second identical request if the first is slow after "
-            "EMBEDDING_HEDGE_SECONDS; whichever finishes first wins. When the budget is exhausted "
-            "the existing retrieval fail-open applies."
+            "hedges (strategy B): a new identical request is fired every EMBEDDING_HEDGE_SECONDS "
+            "up to EMBEDDING_HEDGE_MAX_IN_FLIGHT requests, the first success wins and the rest are "
+            "cancelled. When the budget is exhausted the existing retrieval fail-open applies."
         ),
     )
     EMBEDDING_HEDGE_SECONDS: float = Field(
-        default=1.5,
+        default=0.8,
         description=(
-            "Seconds with no query-embedding result before the hedge fires a second identical "
-            "request concurrently (query path only). Must be below EMBEDDING_TIMEOUT_SECONDS."
+            "Interval between hedged query-embedding requests (query path only): a new identical "
+            "request is fired every this many seconds, up to EMBEDDING_HEDGE_MAX_IN_FLIGHT in "
+            "flight. Must be below EMBEDDING_TIMEOUT_SECONDS."
+        ),
+    )
+    EMBEDDING_HEDGE_MAX_IN_FLIGHT: int = Field(
+        default=4,
+        description=(
+            "Maximum number of hedged query-embedding requests per query call (query path only). "
+            "Also the maximum total attempts: if every attempt fails the call fails."
         ),
     )
     EMBEDDING_BATCH_TIMEOUT_SECONDS: float = Field(
