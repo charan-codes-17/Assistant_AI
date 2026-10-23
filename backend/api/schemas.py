@@ -58,6 +58,10 @@ class SessionNewResponse(BaseModel):
 
 AUTH_USERNAME_MAX = 100
 AUTH_PASSWORD_MAX = 128
+AUTH_USERNAME_MIN = 3
+AUTH_PASSWORD_MIN = 12
+AUTH_INVITE_CODE_MAX = 64
+AUTH_USERNAME_PATTERN = r"^[A-Za-z0-9_]+$"
 
 
 class LoginRequest(BaseModel):
@@ -77,6 +81,28 @@ class LoginResponse(BaseModel):
 
 class LogoutResponse(BaseModel):
     ok: bool
+
+
+class SignupRequest(BaseModel):
+    """Web signup body with hard caps. The password and the invite code are never echoed back or
+    logged.
+
+    `invite_code` is length-capped but deliberately NOT min_length-capped: an empty or missing
+    code must reach the route so it can return the same generic 403 as a wrong code.
+    """
+
+    username: str = Field(
+        min_length=AUTH_USERNAME_MIN,
+        max_length=AUTH_USERNAME_MAX,
+        pattern=AUTH_USERNAME_PATTERN,
+    )
+    password: str = Field(min_length=AUTH_PASSWORD_MIN, max_length=AUTH_PASSWORD_MAX)
+    invite_code: str = Field(default="", max_length=AUTH_INVITE_CODE_MAX)
+
+    @field_validator("invite_code")
+    @classmethod
+    def _strip_invite_code(cls, value: str) -> str:
+        return value.strip()
 
 
 # ---------------------------------------------------------------------------

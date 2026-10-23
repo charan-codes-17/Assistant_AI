@@ -11,8 +11,11 @@ Design notes
 - Fail-closed in production: when APP_ENV == "production" and JWT_SECRET is missing or shorter
   than 32 characters, `auth_configured()` is False, so login refuses (503, enforced in the
   route) and every token is rejected (401, enforced here).
-- The login throttle is PER-PROCESS and in-memory. Behind more than one API instance every
-  replica keeps its own counter, so the effective limit is per replica, not global.
+- The login and signup throttles are PER-PROCESS and in-memory. Behind more than one API
+  instance every replica keeps its own counter, so the effective limit is per replica, not global.
+- Both throttles key on the NORMALISED username only; the client IP is never part of a key
+  (X-Forwarded-For is not trusted). Signup additionally counts every failure against ONE global
+  key, which blocks signup for everyone once that budget is spent.
 """
 
 from __future__ import annotations
@@ -65,6 +68,15 @@ def auth_configured() -> bool:
     return True
 
 
+def normalize_username(username: str) -> str:
+    """Canonical username form for storage, lookup and throttling: trimmed, lower-cased.
+
+    Applied on signup (stored value) and on login (lookup), so "Riya" and "riya" are the same
+    account and cannot both exist. Only the username is normalised; a password is never altered.
+    """
+    return username.strip().lower()
+
+
 def create_token(user_id: int, *, now: Optional[datetime] = None) -> str:
     """Sign an HS256 token for `user_id`. `now` is injectable for tests."""
     issued = now or datetime.now(timezone.utc)
@@ -105,7 +117,11 @@ def decode_token(token: str) -> Optional[int]:
 
 
 class LoginThrottle:
-    """Per-process failed-login counter keyed by (username, client_ip).
+    """Per-process failed-attempt counter keyed by an opaque tuple supplied by the caller.
+
+    The login route keys on the normalised username alone, e.g. `("riya",)`. The signup route keys
+    on the normalised username and, separately, on one global key shared by every signup attempt.
+    The client IP is deliberately NOT part of any key: X-Forwarded-For is not trusted.
 
     NOT shared across processes: with more than one API replica each keeps its own window, so the
     real limit is `max_attempts` per replica. `now_fn` is injectable so tests can advance a fake
@@ -121,9 +137,9 @@ class LoginThrottle:
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
         self.now_fn = now_fn
-        self._failures: dict[tuple[str, str], list[float]] = {}
+        self._failures: dict[tuple[str, ...], list[float]] = {}
 
-    def _recent(self, key: tuple[str, str]) -> list[float]:
+    def _recent(self, key: tuple[str, ...]) -> list[float]:
         cutoff = self.now_fn() - self.window_seconds
         recent = [t for t in self._failures.get(key, []) if t > cutoff]
         if recent:
@@ -132,16 +148,21 @@ class LoginThrottle:
             self._failures.pop(key, None)
         return recent
 
-    def is_blocked(self, key: tuple[str, str]) -> bool:
+    def is_blocked(self, key: tuple[str, ...]) -> bool:
         return len(self._recent(key)) >= self.max_attempts
 
-    def record_failure(self, key: tuple[str, str]) -> None:
+    def record_failure(self, key: tuple[str, ...]) -> None:
         self._recent(key)
         self._failures.setdefault(key, []).append(self.now_fn())
 
-    def reset(self, key: tuple[str, str]) -> None:
+    def reset(self, key: tuple[str, ...]) -> None:
         self._failures.pop(key, None)
 
 
-# Module-level throttle used by the login route. Tests may replace `now_fn` or the whole object.
+# Module-level throttles. Tests may replace `now_fn` or the whole object.
+# Login: 5 failures per normalised username per 15 minutes.
 login_throttle = LoginThrottle()
+# Signup: 10 failures per normalised username, AND 10 failures GLOBALLY across every signup
+# attempt, per 15 minutes. The global key means a burst of bad attempts can block signup for
+# everyone for the rest of the window.
+signup_throttle = LoginThrottle(max_attempts=10, window_seconds=15 * 60.0)

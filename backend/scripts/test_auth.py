@@ -26,6 +26,7 @@ import subprocess
 import sys
 import traceback
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -38,7 +39,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import httpx
 import jwt
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 import backend.api.main as main_module
 import backend.api.routes_auth as auth_routes
@@ -58,6 +59,7 @@ CAPTURED_BODIES: List[str] = []
 CAPTURED_LOGS: List[str] = []
 ISSUED_TOKENS: List[str] = []
 PASSWORDS_USED: List[str] = []
+CODES_USED: List[str] = []
 CREATED_USERNAMES: List[str] = []
 SHARED: Dict[str, Any] = {}
 
@@ -199,6 +201,62 @@ def _run_seed(env: Dict[str, str]) -> subprocess.CompletedProcess:
         text=True,
         timeout=180,
     )
+
+
+# ---------------------------------------------------------------------------
+# Signup helpers (Phase 7, web invite-code signup)
+# ---------------------------------------------------------------------------
+
+def new_invite_code() -> str:
+    """A throwaway invite code for this run. Used as a leak-scan needle; never printed."""
+    code = "INV-" + uuid.uuid4().hex[:16]
+    CODES_USED.append(code)
+    return code
+
+
+@contextmanager
+def fresh_signup_throttle(max_attempts: int = 10, window_seconds: float = 15 * 60.0):
+    """Install a throwaway signup throttle driven by a fake clock.
+
+    Signup counts EVERY failure against one global key shared by all attempts, so without this the
+    real module-level throttle would accumulate failures across sections and start returning 429.
+    Yields `(throttle, clock)`; advance the window with `clock["t"] += ...`.
+    """
+    original = auth_routes.signup_throttle
+    clock = {"t": 0.0}
+    throttle = LoginThrottle(
+        max_attempts=max_attempts,
+        window_seconds=window_seconds,
+        now_fn=lambda: clock["t"],
+    )
+    auth_routes.signup_throttle = throttle
+    try:
+        yield throttle, clock
+    finally:
+        auth_routes.signup_throttle = original
+
+
+async def signup(
+    client: httpx.AsyncClient, username: str, password: str, invite_code: str
+) -> httpx.Response:
+    response = await client.post(
+        "/auth/signup",
+        json={"username": username, "password": password, "invite_code": invite_code},
+    )
+    CAPTURED_BODIES.append(response.text)
+    return response
+
+
+async def count_rows(username: str) -> int:
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(User.id).where(
+                    func.lower(User.username) == auth_service.normalize_username(username)
+                )
+            )
+        ).all()
+    return len(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -678,9 +736,452 @@ async def a14(ctx: Ctx) -> tuple:
     )
 
 
+# ---------------------------------------------------------------------------
+# A15 signup (a): valid code + fresh username -> 200, HttpOnly cookie, DB row
+# ---------------------------------------------------------------------------
+
+async def a15(ctx: Ctx) -> tuple:
+    code = new_invite_code()
+    username = new_username("a15")
+    password = new_password()
+    original_codes = settings.INVITE_CODES
+    settings.INVITE_CODES = code
+    try:
+        with fresh_signup_throttle():
+            r = await signup(ctx.client, username, password, code)
+    finally:
+        settings.INVITE_CODES = original_codes
+
+    token = cookie_token(r)
+    if token:
+        ISSUED_TOKENS.append(token)
+    normalized = auth_service.normalize_username(username)
+    CREATED_USERNAMES.append(normalized)
+
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(select(User).where(User.username == normalized))
+        ).scalar_one_or_none()
+    try:
+        body = r.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+
+    checks = [
+        ("signup 200", r.status_code == 200),
+        (
+            "body ok+ids",
+            body.get("ok") is True
+            and row is not None
+            and body.get("user_id") == row.id
+            and body.get("username") == normalized,
+        ),
+        ("cookie set", bool(token)),
+        ("HttpOnly", has_attr(r, "httponly")),
+        ("row exists", row is not None),
+        ("username stored", row is not None and row.username == normalized),
+        (
+            "hash verifies",
+            row is not None
+            and bool(row.password_hash)
+            and auth_service.verify_password(password, row.password_hash),
+        ),
+        ("chat_id NULL", row is not None and row.telegram_chat_id is None),
+        ("token not in body", bool(token) and token not in r.text),
+    ]
+    ok = all(passed for _, passed in checks)
+    detail = ", ".join(f"{n}={'ok' if p else 'BAD'}" for n, p in checks)
+    return ok, detail
+
+
+# ---------------------------------------------------------------------------
+# A16 signup (b): wrong / empty / codes-unset -> identical 403, no row
+# ---------------------------------------------------------------------------
+
+async def a16(ctx: Ctx) -> tuple:
+    code = new_invite_code()
+    wrong_user = new_username("a16w")
+    empty_user = new_username("a16e")
+    unset_user = new_username("a16u")
+    pw_wrong = new_password()
+    pw_empty = new_password()
+
+    original_codes = settings.INVITE_CODES
+    try:
+        with fresh_signup_throttle():
+            settings.INVITE_CODES = code
+            r_wrong = await signup(ctx.client, wrong_user, pw_wrong, "definitely-not-the-code")
+            settings.INVITE_CODES = code
+            r_empty = await signup(ctx.client, empty_user, pw_empty, "")
+            settings.INVITE_CODES = ""  # INVITE_CODES unset
+            r_unset = await signup(ctx.client, unset_user, new_password(), code)
+    finally:
+        settings.INVITE_CODES = original_codes
+
+    SHARED["signup_invalid_body"] = r_wrong.text
+    statuses = [r_wrong.status_code, r_empty.status_code, r_unset.status_code]
+    identical = len({r_wrong.text, r_empty.text, r_unset.text}) == 1
+    rows_created = (
+        await count_rows(wrong_user)
+        + await count_rows(empty_user)
+        + await count_rows(unset_user)
+    )
+
+    checks = [
+        ("all three 403", statuses == [403, 403, 403]),
+        ("identical body", identical),
+        ("no rows created", rows_created == 0),
+    ]
+    ok = all(passed for _, passed in checks)
+    detail = ", ".join(f"{n}={'ok' if p else 'BAD'}" for n, p in checks)
+    return ok, detail
+
+
+# ---------------------------------------------------------------------------
+# A17 signup (c): duplicate username (incl. different case) -> 409, one row
+# ---------------------------------------------------------------------------
+
+async def a17(ctx: Ctx) -> tuple:
+    code = new_invite_code()
+    username = new_username("a17")
+    password = new_password()
+    other_pw = new_password()
+
+    original_codes = settings.INVITE_CODES
+    settings.INVITE_CODES = code
+    try:
+        with fresh_signup_throttle():
+            first = await signup(ctx.client, username, password, code)
+            dup_same = await signup(ctx.client, username, other_pw, code)
+            dup_case = await signup(ctx.client, username.upper(), other_pw, code)
+    finally:
+        settings.INVITE_CODES = original_codes
+
+    normalized = auth_service.normalize_username(username)
+    CREATED_USERNAMES.append(normalized)
+    row_count = await count_rows(username)
+
+    checks = [
+        ("first 200", first.status_code == 200),
+        ("dup same 409", dup_same.status_code == 409),
+        ("dup case 409", dup_case.status_code == 409),
+        ("exactly one row", row_count == 1),
+        ("409 identical", dup_same.text == dup_case.text and "unavailable" in dup_same.text),
+    ]
+    ok = all(passed for _, passed in checks)
+    detail = ", ".join(f"{n}={'ok' if p else 'BAD'}" for n, p in checks)
+    return ok, detail
+
+
+# ---------------------------------------------------------------------------
+# A18 signup (d): global user cap -> the SAME 403 as an invalid code
+# ---------------------------------------------------------------------------
+
+async def a18(ctx: Ctx) -> tuple:
+    code = new_invite_code()
+    username = new_username("a18")
+    password = new_password()
+    ref_user = new_username("a18ref")
+
+    original_codes, original_cap = settings.INVITE_CODES, settings.BOT_MAX_USERS
+    settings.INVITE_CODES = code
+    try:
+        with fresh_signup_throttle():
+            # Reference: an invalid code, i.e. the same generic 403 that (b) asserts.
+            r_ref = await signup(
+                ctx.client, ref_user, new_password(), "definitely-not-the-code"
+            )
+            # Then saturate the cap and retry with the VALID code.
+            settings.BOT_MAX_USERS = 0  # any existing user means the cap is already reached
+            r_cap = await signup(ctx.client, username, password, code)
+    finally:
+        settings.INVITE_CODES = original_codes
+        settings.BOT_MAX_USERS = original_cap
+
+    row_count = await count_rows(username)
+    checks = [
+        ("cap -> 403", r_cap.status_code == 403),
+        ("same body as invalid code", r_cap.text == r_ref.text),
+        ("no row created", row_count == 0),
+    ]
+    ok = all(passed for _, passed in checks)
+    detail = ", ".join(f"{n}={'ok' if p else 'BAD'}" for n, p in checks)
+    return ok, detail
+
+
+# ---------------------------------------------------------------------------
+# A19 signup (e): throttle -> 429; the global key (not the per-username key) is
+# what blocks a different username
+# ---------------------------------------------------------------------------
+
+async def a19(ctx: Ctx) -> tuple:
+    code = new_invite_code()
+    user1 = new_username("a19a")
+    user2 = new_username("a19b")
+    password = new_password()
+
+    original_codes = settings.INVITE_CODES
+    settings.INVITE_CODES = code
+
+    original_throttle = auth_routes.signup_throttle
+    clock = {"t": 0.0}
+    throttle = LoginThrottle(
+        max_attempts=10, window_seconds=15 * 60.0, now_fn=lambda: clock["t"]
+    )
+    auth_routes.signup_throttle = throttle
+    try:
+        fails = [
+            (
+                await signup(
+                    ctx.client, user1, password, f"nope-{uuid.uuid4().hex[:8]}"
+                )
+            ).status_code
+            for _ in range(10)
+        ]
+        eleventh = (
+            await signup(ctx.client, user1, password, f"nope-{uuid.uuid4().hex[:8]}")
+        ).status_code
+        other = (
+            await signup(ctx.client, user2, password, f"nope-{uuid.uuid4().hex[:8]}")
+        ).status_code
+        user2_key_blocked = throttle.is_blocked(
+            ("signup_user", auth_service.normalize_username(user2))
+        )
+        global_key_blocked = throttle.is_blocked(("signup_global", "*"))
+
+        clock["t"] += 15 * 60.0 + 1
+        after_window = (
+            await signup(ctx.client, user1, password, f"nope-{uuid.uuid4().hex[:8]}")
+        ).status_code
+    finally:
+        auth_routes.signup_throttle = original_throttle
+        settings.INVITE_CODES = original_codes
+
+    checks = [
+        ("10 fails -> 403", fails == [403] * 10),
+        ("11th -> 429", eleventh == 429),
+        (
+            "other user: per-username free, GLOBAL blocks",
+            other == 429 and global_key_blocked and not user2_key_blocked,
+        ),
+        ("after window -> 403", after_window == 403),
+    ]
+    ok = all(passed for _, passed in checks)
+    detail = ", ".join(f"{n}={'ok' if p else 'BAD'}" for n, p in checks)
+    detail += (
+        f"; user2_per_username_blocked={user2_key_blocked}, "
+        f"global_key_blocked={global_key_blocked}"
+    )
+    return ok, detail
+
+
+# ---------------------------------------------------------------------------
+# A20 signup (f): the cookie from signup authenticates GET /me
+# ---------------------------------------------------------------------------
+
+async def a20(ctx: Ctx) -> tuple:
+    code = new_invite_code()
+    username = new_username("a20")
+    password = new_password()
+
+    original_codes = settings.INVITE_CODES
+    settings.INVITE_CODES = code
+    try:
+        with fresh_signup_throttle():
+            r = await signup(ctx.client, username, password, code)
+    finally:
+        settings.INVITE_CODES = original_codes
+
+    token = cookie_token(r)
+    if token:
+        ISSUED_TOKENS.append(token)
+    normalized = auth_service.normalize_username(username)
+    CREATED_USERNAMES.append(normalized)
+    if not token:
+        return False, f"signup status={r.status_code}, no cookie"
+
+    r_me = await ctx.client.get("/me", cookies={settings.AUTH_COOKIE_NAME: token})
+    CAPTURED_BODIES.append(r_me.text)
+    try:
+        body = r_me.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+
+    async with AsyncSessionLocal() as session:
+        expected_uid = (
+            await session.execute(select(User.id).where(User.username == normalized))
+        ).scalar_one_or_none()
+
+    ok = (
+        r_me.status_code == 200
+        and expected_uid is not None
+        and body.get("user_id") == expected_uid
+    )
+    return ok, (
+        f"signup={r.status_code}, me={r_me.status_code}, "
+        f"uid_match={body.get('user_id') == expected_uid}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A21 signup (g): no captured body or log line leaks a password, invite code,
+# hash prefix, or token (mirrors A12, adds codes)
+# ---------------------------------------------------------------------------
+
+async def a21(ctx: Ctx) -> tuple:
+    needles: List[tuple] = [("password", p) for p in PASSWORDS_USED]
+    needles += [("code", c) for c in CODES_USED]
+    needles.append(("hash_prefix", BCRYPT_PREFIX))
+    needles += [("token", t) for t in ISSUED_TOKENS]
+
+    leaks: List[str] = []
+    for kind, needle in needles:
+        if not needle:
+            continue
+        for body in CAPTURED_BODIES:
+            if needle in body:
+                leaks.append(f"{kind} in response body")
+        for line in CAPTURED_LOGS:
+            if needle in line:
+                leaks.append(f"{kind} in log line")
+
+    ok = not leaks
+    detail = (
+        f"scanned {len(CAPTURED_BODIES)} bodies, {len(CAPTURED_LOGS)} log lines, "
+        f"{len(needles)} needles"
+    )
+    if leaks:
+        detail += f"; LEAKS={sorted(set(leaks))[:5]}"
+    return ok, detail
+
+
+# ---------------------------------------------------------------------------
+# A22 signup (h): login still works after the key change
+# ---------------------------------------------------------------------------
+
+async def a22(ctx: Ctx) -> tuple:
+    username = new_username("a22")
+    password = new_password()
+    uid = await create_user(username, password)
+
+    r = await login(ctx.client, username, password)
+    token = cookie_token(r)
+    if token:
+        ISSUED_TOKENS.append(token)
+    try:
+        body = r.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+
+    ok = (
+        r.status_code == 200
+        and bool(token)
+        and body.get("ok") is True
+        and body.get("user_id") == uid
+    )
+    return ok, (
+        f"login={r.status_code}, cookie={'yes' if token else 'no'}, "
+        f"uid_match={body.get('user_id') == uid}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A23 signup: a NON-ASCII invite code is a plain 403, never a 500
+# (hmac.compare_digest raises TypeError on a non-ASCII str)
+# ---------------------------------------------------------------------------
+
+async def a23(ctx: Ctx) -> tuple:
+    code = new_invite_code()
+    user_ref = new_username("a23r")
+    user_acc = new_username("a23a")
+    user_cjk = new_username("a23c")
+
+    original_codes = settings.INVITE_CODES
+    settings.INVITE_CODES = code
+    try:
+        with fresh_signup_throttle():
+            r_ref = await signup(ctx.client, user_ref, new_password(), "definitely-not-the-code")
+            r_acc = await signup(ctx.client, user_acc, new_password(), "é")
+            r_cjk = await signup(ctx.client, user_cjk, new_password(), "日本")
+    finally:
+        settings.INVITE_CODES = original_codes
+
+    rows_created = (
+        await count_rows(user_ref) + await count_rows(user_acc) + await count_rows(user_cjk)
+    )
+    checks = [
+        ("reference wrong code 403", r_ref.status_code == 403),
+        ("non-ASCII 'é' 403 not 500", r_acc.status_code == 403),
+        ("non-ASCII '日本' 403 not 500", r_cjk.status_code == 403),
+        (
+            "identical body to wrong code",
+            r_acc.text == r_ref.text and r_cjk.text == r_ref.text,
+        ),
+        ("no rows created", rows_created == 0),
+    ]
+    ok = all(passed for _, passed in checks)
+    detail = ", ".join(f"{n}={'ok' if p else 'BAD'}" for n, p in checks)
+    detail += f"; statuses={[r_ref.status_code, r_acc.status_code, r_cjk.status_code]}"
+    return ok, detail
+
+
+# ---------------------------------------------------------------------------
+# A24 signup: repeated 409s (username taken) must NOT spend the GLOBAL budget,
+# so a later signup with a valid code and a fresh username still succeeds
+# ---------------------------------------------------------------------------
+
+async def a24(ctx: Ctx) -> tuple:
+    code = new_invite_code()
+    taken = new_username("a24t")
+    winner = new_username("a24w")
+    password = new_password()
+
+    original_codes = settings.INVITE_CODES
+    settings.INVITE_CODES = code
+    try:
+        with fresh_signup_throttle():
+            first = await signup(ctx.client, taken, password, code)
+            duplicates = [
+                (await signup(ctx.client, taken, new_password(), code)).status_code
+                for _ in range(10)
+            ]
+            global_blocked_after = auth_routes.signup_throttle.is_blocked(
+                ("signup_global", "*")
+            )
+            user_key_blocked_after = auth_routes.signup_throttle.is_blocked(
+                ("signup_user", auth_service.normalize_username(taken))
+            )
+            late = await signup(ctx.client, winner, new_password(), code)
+    finally:
+        settings.INVITE_CODES = original_codes
+
+    CREATED_USERNAMES.append(auth_service.normalize_username(taken))
+    CREATED_USERNAMES.append(auth_service.normalize_username(winner))
+    winner_token = cookie_token(late)
+    if winner_token:
+        ISSUED_TOKENS.append(winner_token)
+
+    checks = [
+        ("first signup 200", first.status_code == 200),
+        ("10 duplicates 409", duplicates == [409] * 10),
+        ("global key untouched", global_blocked_after is False),
+        ("per-username key spent", user_key_blocked_after is True),
+        ("later valid signup 200", late.status_code == 200),
+    ]
+    ok = all(passed for _, passed in checks)
+    detail = ", ".join(f"{n}={'ok' if p else 'BAD'}" for n, p in checks)
+    detail += (
+        f"; dup_statuses={sorted(set(duplicates))}, global_blocked={global_blocked_after}, "
+        f"user_key_blocked={user_key_blocked_after}, late={late.status_code}"
+    )
+    return ok, detail
+
+
 ORDER = [
     "A1", "A2", "A3", "A3b", "A3c", "A4", "A5", "A6", "A7",
     "A8", "A9", "A10", "A11", "A12", "A13", "A14",
+    "A15", "A16", "A17", "A18", "A19", "A20", "A21", "A22",
+    "A23", "A24",
 ]
 
 FUNCS = {
@@ -700,6 +1201,16 @@ FUNCS = {
     "A12": a12,
     "A13": a13,
     "A14": a14,
+    "A15": a15,
+    "A16": a16,
+    "A17": a17,
+    "A18": a18,
+    "A19": a19,
+    "A20": a20,
+    "A21": a21,
+    "A22": a22,
+    "A23": a23,
+    "A24": a24,
 }
 
 
