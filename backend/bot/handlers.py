@@ -119,7 +119,10 @@ def _invite_codes() -> list[str]:
 def _code_matches(code: str, configured: Sequence[str]) -> bool:
     if not code:
         return False
-    return any(hmac.compare_digest(code, candidate) for candidate in configured)
+    given = code.encode("utf-8")
+    return any(
+        hmac.compare_digest(given, candidate.encode("utf-8")) for candidate in configured
+    )
 
 
 def _to_int(raw: str) -> Optional[int]:
@@ -967,7 +970,9 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
                 chat_state.forget_nonce is not None
                 and chat_state.forget_expires_at is not None
                 and _forget_now() <= chat_state.forget_expires_at
-                and hmac.compare_digest(provided, chat_state.forget_nonce)
+                and hmac.compare_digest(
+                    provided.encode("utf-8"), chat_state.forget_nonce.encode("utf-8")
+                )
             )
             chat_state.forget_nonce = None
             chat_state.forget_expires_at = None

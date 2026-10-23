@@ -962,6 +962,31 @@ async def b12() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# B16
+# ---------------------------------------------------------------------------
+async def b16() -> dict:
+    """A non-ASCII invite code gets the normal refusal, never the generic error handler."""
+    chat = next_chat()
+    bot, ctx, st = make_env()
+    escaped = None
+    with patched_settings(INVITE_CODES="TESTCODE"):
+        try:
+            await handlers.cmd_start(FakeUpdate(chat, text="/start é"), ctx, state=st)
+        except Exception as exc:  # noqa: BLE001 - this is what would reach on_error in production
+            escaped = type(exc).__name__
+        texts = [m["text"] for m in bot.sent if m["chat_id"] == chat]
+    uid = await db_user_id_for_chat(chat)
+    refusal_sent = texts == [handlers.REFUSAL]
+    generic_sent = any(t == handlers.GENERIC_ERROR for t in texts)
+    ok = escaped is None and refusal_sent and not generic_sent and uid is None
+    return row("B16", "non-ASCII invite code",
+               "refusal reply, no generic error, no user row",
+               f"escaped={escaped}, refusal_sent={refusal_sent}, "
+               f"generic_sent={generic_sent}, row={uid}",
+               ok, "")
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 async def main() -> int:
@@ -971,7 +996,9 @@ async def main() -> int:
     print("=" * 140)
 
     results: list[dict] = []
-    simple_cases = [b1, b2, b3, b4, b5, b6, b7, b8, b9, b10a, b10b, b10c, b10d, b12, b13, b14, b15]
+    simple_cases = [
+        b1, b2, b3, b4, b5, b6, b7, b8, b9, b10a, b10b, b10c, b10d, b12, b13, b14, b15, b16,
+    ]
     try:
         for case in simple_cases:
             print(f"--- Running {case.__name__.upper()} ---")
