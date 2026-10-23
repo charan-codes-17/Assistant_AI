@@ -191,6 +191,17 @@ export function login(username: string, password: string): Promise<LoginResponse
   });
 }
 
+export function signup(
+  username: string,
+  password: string,
+  inviteCode: string,
+): Promise<LoginResponse> {
+  return request<LoginResponse>("/auth/signup", {
+    method: "POST",
+    body: JSON.stringify({ username, password, invite_code: inviteCode }),
+  });
+}
+
 export function logout(): Promise<LogoutResponse> {
   return request<LogoutResponse>("/auth/logout", { method: "POST" });
 }
