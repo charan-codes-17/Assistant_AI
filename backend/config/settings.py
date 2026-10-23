@@ -98,6 +98,14 @@ class Settings(BaseSettings):
         default=25,
         description="Max users the bot will sign up; further /start requests are refused.",
     )
+    BOT_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Run the Telegram poller (and the reminder scheduler and the Whisper warm-up) "
+            "inside the API process, single-process mode. FALSE by default so that no test "
+            "and no local uvicorn run ever starts polling. Set BOT_ENABLED=true to enable."
+        ),
+    )
 
     # Whisper STT (local, CPU int8). Model directory = WHISPER_MODEL_ROOT/whisper-<name>.
     WHISPER_MODEL_NAME: str = Field(

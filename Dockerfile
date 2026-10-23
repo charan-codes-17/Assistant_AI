@@ -12,11 +12,13 @@ WORKDIR /app
 COPY backend/requirements.lock ./backend/requirements.lock
 RUN pip install --no-cache-dir -r backend/requirements.lock
 
-# 2) Bake BOTH Whisper models in their own layer, BEFORE app code, so code changes
+# 2) Bake the Whisper models in their own layer, BEFORE app code, so code changes
 #    do not re-download them. snapshot_download(..., local_dir=...) writes plain
 #    folders (no symlinks); the guard below fails the build if any symlink appears.
+#    Only base + tiny: single-process mode must fit the container's memory budget.
+ENV WHISPER_MODEL_NAME=base
 ENV WHISPER_MODEL_ROOT=/app/whisper_models
-RUN python -c "from huggingface_hub import snapshot_download as d; d(repo_id='Systran/faster-whisper-small', local_dir='/app/whisper_models/whisper-small'); d(repo_id='Systran/faster-whisper-base', local_dir='/app/whisper_models/whisper-base')"
+RUN python -c "from huggingface_hub import snapshot_download as d; d(repo_id='Systran/faster-whisper-base', local_dir='/app/whisper_models/whisper-base'); d(repo_id='Systran/faster-whisper-tiny', local_dir='/app/whisper_models/whisper-tiny')"
 RUN python -c "import os,sys; bad=[os.path.join(r,f) for r,_,fs in os.walk('/app/whisper_models') for f in fs if os.path.islink(os.path.join(r,f))]; sys.exit('symlinks found: '+repr(bad[:3])) if bad else None"
 
 # 3) Application code + Alembic config only.

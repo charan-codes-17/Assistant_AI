@@ -32,28 +32,8 @@ def main() -> None:
     configure_logging()
     settings.require("TELEGRAM_BOT_TOKEN")
 
-    from telegram.ext import (
-        Application,
-        CallbackQueryHandler,
-        CommandHandler,
-        MessageHandler,
-        filters,
-    )
-
     from backend.bot import scheduler as scheduler_module
-    from backend.bot.handlers import (
-        cmd_forget,
-        cmd_help,
-        cmd_memory,
-        cmd_quiet,
-        cmd_start,
-        on_callback,
-        on_error,
-        on_newsession,
-        on_other_command,
-        on_text,
-        on_voice,
-    )
+    from backend.bot.app import build_application
 
     if not settings.INVITE_CODES.strip():
         logging.getLogger(__name__).warning(
@@ -90,25 +70,7 @@ def main() -> None:
             except asyncio.CancelledError:
                 pass
 
-    application = (
-        Application.builder()
-        .token(settings.TELEGRAM_BOT_TOKEN)
-        .concurrent_updates(True)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("newsession", on_newsession))
-    application.add_handler(CommandHandler("quiet", cmd_quiet))
-    application.add_handler(CommandHandler("help", cmd_help))
-    application.add_handler(CommandHandler("memory", cmd_memory))
-    application.add_handler(CommandHandler("forget", cmd_forget))
-    application.add_handler(CallbackQueryHandler(on_callback))
-    application.add_handler(MessageHandler(filters.VOICE, on_voice))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    application.add_handler(MessageHandler(filters.COMMAND, on_other_command))
-    application.add_error_handler(on_error)
+    application = build_application(post_init=post_init, post_shutdown=post_shutdown)
 
     application.run_polling(
         drop_pending_updates=True,
