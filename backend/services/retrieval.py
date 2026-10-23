@@ -76,6 +76,9 @@ class RetrievedItem(BaseModel):
     similarity: float
     confidence: int
     reason: str
+    # The record's own stored "why" (KnowledgeRecord.rationale). Nullable: most records have none.
+    # Distinct from `reason`, which is the relevance judge's justification.
+    rationale: Optional[str] = None
 
 
 class CandidateEvaluation(BaseModel):
@@ -257,14 +260,17 @@ async def retrieve_memory(
                 if rec.created_at
                 else "unknown"
             )
-            candidates_text_lines.append(
-                f"ID: {rec.id}\n"
-                f"Content: {rec.content}\n"
-                f"Kind: {rec.kind}\n"
-                f"Certainty: {rec.certainty}\n"
-                f"Created: {created_str}\n"
-                f"Similarity Score: {sim:.4f}"
-            )
+            lines = [
+                f"ID: {rec.id}",
+                f"Content: {rec.content}",
+                f"Kind: {rec.kind}",
+                f"Certainty: {rec.certainty}",
+                f"Created: {created_str}",
+            ]
+            if rec.rationale:
+                lines.append(f"Rationale: {rec.rationale}")
+            lines.append(f"Similarity Score: {sim:.4f}")
+            candidates_text_lines.append("\n".join(lines))
         candidates_block = "\n---\n".join(candidates_text_lines)
 
         user_prompt = (
@@ -337,6 +343,7 @@ async def retrieve_memory(
                         similarity=sim,
                         confidence=clamped_conf,
                         reason=j.reason,
+                        rationale=rec.rationale,
                     )
                 )
 

@@ -143,6 +143,11 @@ function PendingRecords({
             className="rounded-lg border border-slate-800 bg-slate-950/60 p-3"
           >
             <p className="text-sm leading-relaxed text-slate-200">{record.content}</p>
+            {record.rationale ? (
+              <p className="mt-1 text-xs leading-relaxed text-slate-400">
+                Reason: {record.rationale}
+              </p>
+            ) : null}
             <p className="mt-1 text-xs text-slate-500">
               {record.kind} · {record.certainty}
             </p>

@@ -100,6 +100,7 @@ export type PendingRecord = {
   certainty: string;
   source: string;
   status: string;
+  rationale: string | null;
 };
 
 export type PendingTaskOut = {
