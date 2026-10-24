@@ -229,6 +229,48 @@ export type BatchRejectResponse = {
 };
 
 // ---------------------------------------------------------------------------
+// Conversations (server-side chat history)
+// Mirrors backend/api/schemas.py. Field caps are shared by the UI and the client.
+// ---------------------------------------------------------------------------
+
+export const CONVERSATION_TITLE_MAX = 120;
+export const CONVERSATION_FIRST_MESSAGE_MAX = 8000;
+export const CONVERSATION_MESSAGE_MAX = 8000;
+
+/** List item. Only id, title and updated_at are exposed by the backend. */
+export type ConversationOut = {
+  id: number;
+  title: string;
+  updated_at: string;
+};
+
+/** One stored turn. `content` is untrusted text, rendered as plain text only. */
+export type ChatMessageOut = {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+};
+
+export type ConversationDetail = {
+  id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: ChatMessageOut[];
+};
+
+export type MessagePairResponse = {
+  conversation_id: number;
+  messages: ChatMessageOut[];
+};
+
+export type ConversationActionResponse = {
+  id: number;
+  status: string;
+};
+
+// ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
 
@@ -355,6 +397,61 @@ export function discardTask(turnId: string, index: number): Promise<TaskActionRe
     `/chat/${encodeURIComponent(turnId)}/tasks/${index}/discard`,
     { method: "POST" },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Conversations (server-side chat history)
+// ---------------------------------------------------------------------------
+
+/** GET /conversations. Newest first, ownership-scoped by the backend. */
+export function listConversations(): Promise<ConversationOut[]> {
+  return request<ConversationOut[]>("/conversations");
+}
+
+/** POST /conversations. The title is derived from the first message by the backend. */
+export function createConversation(firstMessage: string): Promise<ConversationOut> {
+  return request<ConversationOut>("/conversations", {
+    method: "POST",
+    body: JSON.stringify({ first_message: firstMessage }),
+  });
+}
+
+/** GET /conversations/{id}. Returns the stored turns plus conversation metadata. */
+export function getConversation(conversationId: number): Promise<ConversationDetail> {
+  return request<ConversationDetail>(`/conversations/${conversationId}`);
+}
+
+/** POST /conversations/{id}/messages. Appends one user/assistant pair in one transaction. */
+export function appendMessages(
+  conversationId: number,
+  user: string,
+  assistant: string,
+): Promise<MessagePairResponse> {
+  return request<MessagePairResponse>(`/conversations/${conversationId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ user, assistant }),
+  });
+}
+
+/** PATCH /conversations/{id}. Renames a conversation (title max 120 chars). */
+export function renameConversation(
+  conversationId: number,
+  title: string,
+): Promise<ConversationOut> {
+  return request<ConversationOut>(`/conversations/${conversationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+/**
+ * DELETE /conversations/{id}. Destructive: confirm=true is sent only after the UI's own
+ * confirmation step has been completed by the user.
+ */
+export function deleteConversation(conversationId: number): Promise<ConversationActionResponse> {
+  return request<ConversationActionResponse>(`/conversations/${conversationId}?confirm=true`, {
+    method: "DELETE",
+  });
 }
 
 // ---------------------------------------------------------------------------
