@@ -33,6 +33,7 @@ from backend.api.routes_memory import router as memory_router
 from backend.api.routes_onboarding import router as onboarding_router
 from backend.api.routes_profile import router as profile_router
 from backend.api.routes_session import router as session_router
+from backend.api.routes_tasks import router as tasks_router
 from backend.api.schemas import HealthResponse
 from backend.config.settings import settings
 from backend.database import AsyncSessionLocal
@@ -239,3 +240,4 @@ app.include_router(chat_router)
 app.include_router(memory_router)
 app.include_router(profile_router)
 app.include_router(onboarding_router)
+app.include_router(tasks_router)

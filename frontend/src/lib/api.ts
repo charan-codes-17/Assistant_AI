@@ -173,6 +173,15 @@ export type TaskActionResponse = {
   task_id: number | null;
 };
 
+/** Mirrors backend/api/schemas.py TaskOut. The tasks table has no created_at/completed_at. */
+export type TaskOut = {
+  id: number;
+  title: string;
+  due_at: string | null;
+  status: string;
+  origin: string;
+};
+
 export type OnboardingQuestion = {
   id: string;
   text: string;
@@ -321,6 +330,17 @@ export function deleteMemory(recordId: number): Promise<RecordActionResponse> {
   return request<RecordActionResponse>(`/memory/${recordId}?confirm=true`, {
     method: "DELETE",
   });
+}
+
+/** GET /tasks?status=open|done|all (default all). Ownership-scoped by the backend. */
+export function getTasks(status: "open" | "done" | "all" = "all"): Promise<TaskOut[]> {
+  const params = new URLSearchParams({ status });
+  return request<TaskOut[]>(`/tasks?${params.toString()}`);
+}
+
+/** POST /tasks/{id}/done. Already-done tasks return their current state without error. */
+export function markTaskDone(taskId: number): Promise<TaskOut> {
+  return request<TaskOut>(`/tasks/${taskId}/done`, { method: "POST" });
 }
 
 export function confirmTask(turnId: string, index: number): Promise<TaskActionResponse> {

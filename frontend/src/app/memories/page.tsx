@@ -253,6 +253,12 @@ export default function MemoriesPage() {
           >
             Chat
           </Link>
+          <Link
+            href="/tasks"
+            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
+          >
+            Tasks
+          </Link>
           <span
             aria-current="page"
             className="rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100"

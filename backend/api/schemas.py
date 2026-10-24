@@ -237,6 +237,16 @@ class TimelineDay(BaseModel):
     items: list[TimelineItem] = Field(default_factory=list)
 
 
+class TaskOut(BaseModel):
+    """A user task. The `tasks` table has no created_at/completed_at columns, so neither is exposed."""
+
+    id: int
+    title: str
+    due_at: datetime | None = None
+    status: str
+    origin: str
+
+
 # ---------------------------------------------------------------------------
 # Profile
 # ---------------------------------------------------------------------------

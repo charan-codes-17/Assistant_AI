@@ -1140,11 +1140,141 @@ async def a19_injection(ctx: Ctx) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# A20-A22  Tasks API
+# ---------------------------------------------------------------------------
+
+async def seed_tasks(
+    uid: int,
+    titles: List[str],
+    *,
+    status: str = "open",
+    origin: str = "promise",
+) -> List[int]:
+    ids: List[int] = []
+    async with AsyncSessionLocal() as session:
+        for title in titles:
+            task = Task(user_id=uid, title=title, status=status, origin=origin)
+            session.add(task)
+            await session.commit()
+            await session.refresh(task)
+            ids.append(task.id)
+    return ids
+
+
+async def task_status_of(uid: int, task_id: int) -> Optional[str]:
+    async with AsyncSessionLocal() as session:
+        row = await session.get(Task, task_id)
+        if row is None or row.user_id != uid:
+            return None
+        return row.status
+
+
+async def a20_tasks_list(ctx: Ctx) -> Dict[str, Any]:
+    a_uid = await new_user("a20a")
+    b_uid = await new_user("a20b")
+    try:
+        a_ids = await seed_tasks(a_uid, ["A20 own open", "A20 own second"])
+        b_ids = await seed_tasks(b_uid, ["A20 other open"])
+
+        r = await ctx.client.get("/tasks", headers=hdr(a_uid))
+        body = r.json()
+        got = sorted(item["id"] for item in body)
+        only_own = got == sorted(a_ids)
+        no_other = all(item["id"] not in b_ids for item in body)
+
+        scoped = (await ctx.client.get("/tasks?status=open", headers=hdr(a_uid))).json()
+        open_ids = sorted(item["id"] for item in scoped)
+        fields_ok = all(
+            set(item.keys()) == {"id", "title", "due_at", "status", "origin"} for item in body
+        )
+
+        ok = (
+            r.status_code == 200
+            and only_own
+            and no_other
+            and open_ids == sorted(a_ids)
+            and fields_ok
+        )
+        return _result(
+            "A20",
+            "Tasks list ownership",
+            "GET /tasks returns only the caller's tasks",
+            f"got={got}, own={sorted(a_ids)}, other_present={not no_other}",
+            ok,
+            f"open_filter={open_ids}, fields_ok={fields_ok}",
+        )
+    finally:
+        await drop_user(a_uid)
+        await drop_user(b_uid)
+
+
+async def a21_task_done(ctx: Ctx) -> Dict[str, Any]:
+    uid = await new_user("a21")
+    try:
+        (tid,) = await seed_tasks(uid, ["A21 mark me done"])
+
+        r1 = await ctx.client.post(f"/tasks/{tid}/done", headers=hdr(uid))
+        j1 = r1.json()
+        r2 = await ctx.client.post(f"/tasks/{tid}/done", headers=hdr(uid))
+        j2 = r2.json()
+
+        listed_ids = [
+            item["id"]
+            for item in (await ctx.client.get("/tasks?status=done", headers=hdr(uid))).json()
+        ]
+
+        ok = (
+            r1.status_code == 200
+            and j1["id"] == tid
+            and j1["status"] == "done"
+            and r2.status_code == 200
+            and j2["status"] == "done"
+            and tid in listed_ids
+        )
+        return _result(
+            "A21",
+            "Mark own task done",
+            "POST /tasks/{id}/done -> 200 done, idempotent, appears in status=done",
+            f"first={r1.status_code}/{j1.get('status')}, second={r2.status_code}/{j2.get('status')}",
+            ok,
+            f"in_done_list={tid in listed_ids}",
+        )
+    finally:
+        await drop_user(uid)
+
+
+async def a22_task_done_isolation(ctx: Ctx) -> Dict[str, Any]:
+    a_uid = await new_user("a22a")
+    b_uid = await new_user("a22b")
+    try:
+        (tid,) = await seed_tasks(a_uid, ["A22 private task"])
+
+        other = await ctx.client.post(f"/tasks/{tid}/done", headers=hdr(b_uid))
+        missing = await ctx.client.post("/tasks/999999999/done", headers=hdr(a_uid))
+        still_open = await task_status_of(a_uid, tid) == "open"
+        identical = other.status_code == missing.status_code == 404 and other.json() == missing.json()
+
+        ok = identical and still_open
+        return _result(
+            "A22",
+            "Task done isolation",
+            "another user gets 404 (same as missing) and the task stays open",
+            f"other={other.status_code}, missing={missing.status_code}",
+            ok,
+            f"still_open={still_open}, identical_body={identical}",
+        )
+    finally:
+        await drop_user(a_uid)
+        await drop_user(b_uid)
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
 ORDER = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10",
-         "A11", "A12", "A13", "A14", "A15", "A16", "A17", "A18", "A19"]
+         "A11", "A12", "A13", "A14", "A15", "A16", "A17", "A18", "A19",
+         "A20", "A21", "A22"]
 
 FUNCS = {
     "A1": a1_health,
@@ -1166,6 +1296,9 @@ FUNCS = {
     "A17": a17_command,
     "A18": a18_errors,
     "A19": a19_injection,
+    "A20": a20_tasks_list,
+    "A21": a21_task_done,
+    "A22": a22_task_done_isolation,
 }
 
 
