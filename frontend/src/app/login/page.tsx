@@ -52,10 +52,6 @@ export default function LoginPage() {
 
         <h1 className="mt-4 text-2xl font-bold tracking-tight text-neutral-100">Sign in</h1>
 
-        <p className="mt-3 rounded-lg border border-amber-800/60 bg-amber-950/40 p-3 text-xs text-amber-300">
-          {BANNER}
-        </p>
-
         <form onSubmit={handleSubmit} className="mt-5 flex flex-col gap-4">
           <label className="flex flex-col gap-1 text-xs font-medium text-neutral-400">
             Username
@@ -106,6 +102,8 @@ export default function LoginPage() {
             Create one
           </Link>
         </p>
+
+        <p className="mt-4 text-center text-xs text-neutral-500">{BANNER}</p>
       </div>
     </div>
   );

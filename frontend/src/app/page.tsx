@@ -701,10 +701,6 @@ export default function ChatPage() {
       />
 
       <div className="flex min-w-0 flex-1 flex-col bg-black">
-        <div className="shrink-0 border-b border-amber-800/60 bg-amber-950/40 px-4 py-2 text-center text-xs text-amber-300">
-          {BANNER}
-        </div>
-
         <div className="flex shrink-0 items-center border-b border-neutral-800 px-3 py-2 md:hidden">
           <button
             type="button"
@@ -917,6 +913,8 @@ export default function ChatPage() {
                 )}
               </button>
             </form>
+
+            <p className="mt-2 text-center text-xs text-neutral-500">{BANNER}</p>
           </div>
         </main>
       </div>
