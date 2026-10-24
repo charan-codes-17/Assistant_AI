@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 
+import { SidebarShell } from "@/components/sidebar-shell";
 import { CONVERSATION_TITLE_MAX, type ConversationOut } from "@/lib/api";
 
 /**
@@ -11,8 +12,9 @@ import { CONVERSATION_TITLE_MAX, type ConversationOut } from "@/lib/api";
  * passed in. Rename/Delete call the parent's async handlers and only leave their editing state
  * once the backend has confirmed success.
  *
- * Always visible on desktop; on mobile it is a slide-in drawer that is closed by default. Titles
- * are untrusted text and are rendered as plain text (never HTML).
+ * The rail chrome (title, New chat, nav, Recents label, user block) lives in SidebarShell; the
+ * conversation rows are passed to it as children, both in the desktop aside and in the mobile
+ * drawer. Titles are untrusted text and are rendered as plain text (never HTML).
  */
 
 type ChatSidebarProps = {
@@ -27,54 +29,49 @@ type ChatSidebarProps = {
   onNewChat: () => void;
   onRename: (id: number, title: string) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  username: string | null;
+  onLogout: () => void;
+  collapsed?: boolean;
+  onCollapse?: () => void;
 };
 
-type ConversationGroup = {
-  label: string;
-  items: ConversationOut[];
-};
+function RenameIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
 
-// Local-day boundaries for grouping, computed once on mount in an effect (never during render).
-type TimeBounds = {
-  todayStart: number;
-  weekStart: number;
-};
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Today / Previous 7 days / Older, using updated_at in the viewer's local time. `bounds` is
- * produced by the mount effect, so this runs only after the current time is known.
- */
-function groupConversations(items: ConversationOut[], bounds: TimeBounds): ConversationGroup[] {
-  const { todayStart, weekStart } = bounds;
-  const today: ConversationOut[] = [];
-  const week: ConversationOut[] = [];
-  const older: ConversationOut[] = [];
-
-  for (const item of items) {
-    const parsed = Date.parse(item.updated_at);
-    const time = Number.isNaN(parsed) ? 0 : parsed;
-    if (time >= todayStart) {
-      today.push(item);
-    } else if (time >= weekStart) {
-      week.push(item);
-    } else {
-      older.push(item);
-    }
-  }
-
-  const groups: ConversationGroup[] = [];
-  if (today.length > 0) {
-    groups.push({ label: "Today", items: today });
-  }
-  if (week.length > 0) {
-    groups.push({ label: "Previous 7 days", items: week });
-  }
-  if (older.length > 0) {
-    groups.push({ label: "Older", items: older });
-  }
-  return groups;
+function DeleteIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </svg>
+  );
 }
 
 export function ChatSidebar({
@@ -89,39 +86,16 @@ export function ChatSidebar({
   onNewChat,
   onRename,
   onDelete,
+  username,
+  onLogout,
+  collapsed = false,
+  onCollapse,
 }: ChatSidebarProps) {
-  const [query, setQuery] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  // Set once on mount. Null during prerender and the first client render, so grouping waits.
-  const [bounds, setBounds] = useState<TimeBounds | null>(null);
-
-  useEffect(() => {
-    const current = new Date();
-    const todayStart = new Date(
-      current.getFullYear(),
-      current.getMonth(),
-      current.getDate(),
-    ).getTime();
-    setBounds({ todayStart, weekStart: todayStart - 7 * DAY_MS });
-  }, []);
-
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) {
-      return conversations;
-    }
-    return conversations.filter((item) => item.title.toLowerCase().includes(needle));
-  }, [conversations, query]);
-  // Until the mount effect has run, `bounds` is null and the list renders as one flat section
-  // (newest first, no headings). Once known, it is split into Today / Previous 7 days / Older.
-  const groups = useMemo<ConversationGroup[]>(
-    () => (bounds ? groupConversations(filtered, bounds) : [{ label: "", items: filtered }]),
-    [filtered, bounds],
-  );
 
   const startRename = (item: ConversationOut) => {
     setConfirmingId(null);
@@ -170,192 +144,159 @@ export function ChatSidebar({
     onOpenChange(false);
   };
 
-  const panel = (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-4 py-3">
-        <h2 className="text-sm font-semibold text-white">Chats</h2>
-        <button
-          type="button"
-          onClick={() => {
-            onNewChat();
-            onOpenChange(false);
-          }}
-          className="rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-900"
-        >
-          New chat
-        </button>
-      </div>
+  const handleNewChat = () => {
+    onNewChat();
+    onOpenChange(false);
+  };
 
-      <div className="px-4 py-2">
-        <input
-          type="text"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search chats"
-          aria-label="Search chats by title"
-          className="w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-emerald-700"
-        />
-      </div>
-
+  const list = (
+    <div className="pb-2">
       {actionError ? (
-        <p role="alert" className="px-4 pb-1 text-xs text-rose-400">
+        <p role="alert" className="px-3 pb-1 text-xs text-rose-400">
           {actionError}
         </p>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        {loading ? (
-          <p className="px-2 py-3 text-xs text-slate-500">Loading…</p>
-        ) : error ? (
-          <div className="px-2 py-3 text-xs text-slate-400">
-            <p>Could not load chats.</p>
-            <button
-              type="button"
-              onClick={onRetry}
-              className="mt-2 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 hover:border-slate-600"
-            >
-              Retry
-            </button>
-          </div>
-        ) : conversations.length === 0 ? (
-          <p className="px-2 py-3 text-xs text-slate-500">No chats yet</p>
-        ) : filtered.length === 0 ? (
-          <p className="px-2 py-3 text-xs text-slate-500">No chats match your search</p>
-        ) : (
-          groups.map((group) => (
-            <div key={group.label || "all"} className="mt-1">
-              {group.label ? (
-                <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                  {group.label}
-                </p>
-              ) : null}
-              <ul className="space-y-0.5">
-                {group.items.map((item) => {
-                  const active = item.id === activeId;
+      {loading ? (
+        <p className="px-3 py-3 text-xs text-neutral-500">Loading…</p>
+      ) : error ? (
+        <div className="px-3 py-3 text-xs text-neutral-400">
+          <p>Could not load chats.</p>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="mt-2 rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 text-xs font-medium text-neutral-300 hover:bg-neutral-800"
+          >
+            Retry
+          </button>
+        </div>
+      ) : conversations.length === 0 ? (
+        <p className="px-3 py-3 text-xs text-neutral-500">No chats yet</p>
+      ) : (
+        <ul className="space-y-0.5">
+          {conversations.map((item) => {
+            const active = item.id === activeId;
 
-                  if (editingId === item.id) {
-                    return (
-                      <li key={item.id}>
-                        <form
-                          onSubmit={(event) => {
-                            event.preventDefault();
-                            void submitRename(item.id);
-                          }}
-                          className="flex items-center gap-1 px-1 py-1"
-                        >
-                          <input
-                            autoFocus
-                            type="text"
-                            value={editValue}
-                            maxLength={CONVERSATION_TITLE_MAX}
-                            onChange={(event) => setEditValue(event.target.value)}
-                            aria-label="New chat title"
-                            className="min-w-0 flex-1 rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-100 outline-none focus:border-emerald-700"
-                          />
-                          <button
-                            type="submit"
-                            disabled={busyId === item.id || editValue.trim().length === 0}
-                            className="rounded-md border border-emerald-800/60 bg-emerald-950/40 px-2 py-1 text-xs font-medium text-emerald-300 hover:border-emerald-700 disabled:opacity-50"
-                          >
-                            Save
-                          </button>
-                          <button
-                            type="button"
-                            onClick={cancelRename}
-                            className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-xs font-medium text-slate-300 hover:border-slate-600"
-                          >
-                            Cancel
-                          </button>
-                        </form>
-                      </li>
-                    );
-                  }
+            if (editingId === item.id) {
+              return (
+                <li key={item.id}>
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void submitRename(item.id);
+                    }}
+                    className="flex items-center gap-1 px-1 py-1"
+                  >
+                    <input
+                      autoFocus
+                      type="text"
+                      value={editValue}
+                      maxLength={CONVERSATION_TITLE_MAX}
+                      onChange={(event) => setEditValue(event.target.value)}
+                      aria-label="New chat title"
+                      className="min-w-0 flex-1 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={busyId === item.id || editValue.trim().length === 0}
+                      className="rounded-md border border-emerald-800/60 bg-emerald-950/40 px-2 py-1 text-xs font-medium text-emerald-300 hover:border-emerald-700 disabled:opacity-50"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelRename}
+                      className="rounded-md border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs font-medium text-neutral-300 hover:bg-neutral-800"
+                    >
+                      Cancel
+                    </button>
+                  </form>
+                </li>
+              );
+            }
 
-                  if (confirmingId === item.id) {
-                    return (
-                      <li key={item.id} className="px-2 py-1.5">
-                        <p className="text-xs text-slate-300">
-                          Delete this chat? This cannot be undone.
-                        </p>
-                        <div className="mt-2 flex gap-2">
-                          <button
-                            type="button"
-                            disabled={busyId === item.id}
-                            onClick={() => void submitDelete(item.id)}
-                            className="rounded-md border border-rose-800/60 bg-rose-950/40 px-2.5 py-1 text-xs font-medium text-rose-300 hover:border-rose-700 disabled:opacity-50"
-                          >
-                            Delete
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setConfirmingId(null)}
-                            className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 hover:border-slate-600"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </li>
-                    );
-                  }
+            if (confirmingId === item.id) {
+              return (
+                <li key={item.id} className="px-2 py-1.5">
+                  <p className="whitespace-normal text-xs text-neutral-300">
+                    Delete this chat? This cannot be undone.
+                  </p>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      disabled={busyId === item.id}
+                      onClick={() => void submitDelete(item.id)}
+                      className="rounded-md border border-rose-800/60 bg-rose-950/40 px-2.5 py-1 text-xs font-medium text-rose-300 hover:border-rose-700 disabled:opacity-50"
+                    >
+                      Delete
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingId(null)}
+                      className="rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1 text-xs font-medium text-neutral-300 hover:bg-neutral-800"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </li>
+              );
+            }
 
-                  return (
-                    <li key={item.id}>
-                      <div
-                        className={`flex items-center gap-1 rounded-md ${
-                          active ? "bg-slate-800" : "hover:bg-slate-900"
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => handleSelect(item.id)}
-                          aria-current={active ? "true" : undefined}
-                          className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left text-sm"
-                        >
-                          <span
-                            aria-hidden="true"
-                            className={active ? "text-emerald-400" : "text-transparent"}
-                          >
-                            ▍
-                          </span>
-                          <span
-                            className={`truncate ${
-                              active ? "font-semibold text-white" : "text-slate-300"
-                            }`}
-                          >
-                            {item.title}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => startRename(item)}
-                          aria-label={`Rename ${item.title}`}
-                          className="shrink-0 rounded-md px-1.5 py-1 text-xs text-slate-400 hover:text-slate-200"
-                        >
-                          Rename
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingId(null);
-                            setActionError(null);
-                            setConfirmingId(item.id);
-                          }}
-                          aria-label={`Delete ${item.title}`}
-                          className="shrink-0 rounded-md px-1.5 py-1 text-xs text-slate-400 hover:text-rose-300"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))
-        )}
-      </div>
+            return (
+              <li key={item.id}>
+                <div
+                  className={`group flex items-center gap-1 rounded-lg px-1 ${
+                    active ? "bg-neutral-900" : "hover:bg-neutral-900"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => handleSelect(item.id)}
+                    aria-current={active ? "true" : undefined}
+                    className="flex min-w-0 flex-1 items-center gap-2 px-1 py-1.5 text-left text-sm"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={active ? "text-teal-400" : "text-transparent"}
+                    >
+                      ▍
+                    </span>
+                    <span
+                      className={`truncate ${
+                        active ? "font-semibold text-neutral-100" : "text-neutral-300"
+                      }`}
+                    >
+                      {item.title}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => startRename(item)}
+                    aria-label={`Rename ${item.title}`}
+                    className="shrink-0 rounded-md p-1 text-neutral-400 opacity-0 hover:text-neutral-200 focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+                  >
+                    <RenameIcon />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingId(null);
+                      setActionError(null);
+                      setConfirmingId(item.id);
+                    }}
+                    aria-label={`Delete ${item.title}`}
+                    className="shrink-0 rounded-md p-1 text-neutral-400 opacity-0 hover:text-rose-300 focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+                  >
+                    <DeleteIcon />
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
-      <p className="border-t border-slate-800 px-4 py-3 text-xs text-slate-500">
+      <p className="px-3 pt-2 text-xs text-neutral-500">
         Chats are saved to your account. Delete any chat here.
       </p>
     </div>
@@ -363,8 +304,15 @@ export function ChatSidebar({
 
   return (
     <>
-      <aside className="hidden w-72 shrink-0 flex-col border-r border-slate-800 bg-slate-950 md:flex">
-        {panel}
+      <aside className={collapsed ? "hidden" : "hidden shrink-0 md:flex"}>
+        <SidebarShell
+          username={username}
+          onNewChat={handleNewChat}
+          onLogout={onLogout}
+          onCollapse={onCollapse}
+        >
+          {list}
+        </SidebarShell>
       </aside>
 
       {open ? (
@@ -374,19 +322,15 @@ export function ChatSidebar({
             onClick={() => onOpenChange(false)}
             aria-hidden="true"
           />
-          <div className="absolute inset-y-0 left-0 flex w-72 max-w-[85%] flex-col border-r border-slate-800 bg-slate-950">
-            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
-              <span className="text-sm font-semibold text-white">Chats</span>
-              <button
-                type="button"
-                onClick={() => onOpenChange(false)}
-                aria-label="Close chat list"
-                className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 hover:border-slate-600"
-              >
-                Close
-              </button>
-            </div>
-            {panel}
+          <div className="absolute inset-y-0 left-0 flex w-72 max-w-[85%] flex-col">
+            <SidebarShell
+              username={username}
+              onNewChat={handleNewChat}
+              onLogout={onLogout}
+              onCollapse={() => onOpenChange(false)}
+            >
+              {list}
+            </SidebarShell>
           </div>
         </div>
       ) : null}

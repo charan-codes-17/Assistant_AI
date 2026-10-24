@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { AppShell } from "@/components/app-shell";
 import {
   ApiError,
   AuthError,
@@ -207,57 +208,42 @@ export default function OnboardingPage() {
 
   if (!ready) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 p-6 text-sm text-slate-500">
+      <div className="flex min-h-screen items-center justify-center bg-black p-6 text-sm text-neutral-500">
         Loading…
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
-          <span className="text-sm font-semibold tracking-tight text-white">
-            Personal Memory Assistant
-          </span>
-        </div>
-        <Link
-          href="/"
-          className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-        >
-          Go to chat
-        </Link>
-      </header>
-
-      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-4 py-8">
+    <AppShell activeHref="/onboarding">
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 px-6 py-8">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white">Set up your memory</h1>
-          <p className="mt-2 text-sm text-slate-400">
+          <h1 className="text-2xl font-bold tracking-tight text-neutral-100">Set up your memory</h1>
+          <p className="mt-2 text-sm text-neutral-400">
             Choose how the assistant should start. You can change your mind at any time.
           </p>
         </div>
 
         <div className="grid gap-4 md:grid-cols-2">
           {/* Start fresh */}
-          <section className="flex flex-col rounded-xl border border-slate-800 bg-slate-900 p-5">
-            <h2 className="text-base font-semibold text-white">Start fresh</h2>
-            <p className="mt-2 flex-1 text-sm text-slate-400">
+          <section className="flex flex-col rounded-xl border border-neutral-800 bg-neutral-950 p-5">
+            <h2 className="text-base font-semibold text-neutral-100">Start fresh</h2>
+            <p className="mt-2 flex-1 text-sm text-neutral-400">
               The assistant starts with no imported context and learns as you chat. You approve
               every memory.
             </p>
             <Link
               href="/"
-              className="mt-4 rounded-md border border-emerald-700 bg-emerald-900/60 px-4 py-2 text-center text-sm font-semibold text-emerald-100 hover:bg-emerald-900"
+              className="mt-4 rounded-lg border border-teal-700 bg-neutral-900 px-4 py-2 text-center text-sm font-semibold text-teal-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
             >
               Start chatting
             </Link>
           </section>
 
           {/* Bring your AI knowledge */}
-          <section className="flex flex-col rounded-xl border border-slate-800 bg-slate-900 p-5">
-            <h2 className="text-base font-semibold text-white">Bring your AI knowledge</h2>
-            <p className="mt-2 text-sm text-slate-400">
+          <section className="flex flex-col rounded-xl border border-neutral-800 bg-neutral-950 p-5">
+            <h2 className="text-base font-semibold text-neutral-100">Bring your AI knowledge</h2>
+            <p className="mt-2 text-sm text-neutral-400">
               Run a prompt in your other AI, then paste its reply here. This app cannot access any
               other AI account.
             </p>
@@ -267,11 +253,11 @@ export default function OnboardingPage() {
                 type="button"
                 onClick={handleCopyPrompt}
                 disabled={promptLoading}
-                className="rounded-md border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-600 disabled:opacity-50"
+                className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-200 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
               >
                 {promptLoading ? "Loading…" : "Copy prompt"}
               </button>
-              {copied ? <span className="text-xs text-emerald-400">Copied</span> : null}
+              {copied ? <span className="text-xs text-teal-400">Copied</span> : null}
             </div>
             {promptError ? (
               <p role="alert" className="mt-2 text-xs text-rose-400">
@@ -283,21 +269,21 @@ export default function OnboardingPage() {
                 readOnly
                 value={prompt}
                 aria-label="Prompt to run in your other AI"
-                className="mt-2 h-24 w-full resize-none rounded-md border border-slate-800 bg-slate-950 p-2 text-xs text-slate-400 outline-none"
+                className="mt-2 h-24 w-full resize-none rounded-lg border border-neutral-800 bg-neutral-900 p-2 text-xs text-neutral-400 outline-none"
               />
             ) : null}
 
-            <label className="mt-3 flex flex-col gap-1 text-xs font-medium text-slate-400">
+            <label className="mt-3 flex flex-col gap-1 text-xs font-medium text-neutral-400">
               Paste the reply here
               <textarea
                 value={text}
                 onChange={(event) => setText(event.target.value)}
                 maxLength={ONBOARDING_MAX_CHARS}
                 placeholder="Paste your AI's reply…"
-                className="h-40 w-full resize-y rounded-md border border-slate-700 bg-slate-950 p-2 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-emerald-700"
+                className="h-40 w-full resize-y rounded-lg border border-neutral-800 bg-neutral-900 p-2 text-sm text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-teal-600"
               />
             </label>
-            <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+            <div className="mt-1 flex items-center justify-between text-xs text-neutral-500">
               <span>Nothing is saved until you review and confirm.</span>
               <span>
                 {text.length} / {ONBOARDING_MAX_CHARS}
@@ -314,7 +300,7 @@ export default function OnboardingPage() {
               type="button"
               onClick={handleImport}
               disabled={importing || text.trim().length === 0}
-              className="mt-3 rounded-md border border-emerald-700 bg-emerald-900/60 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900 disabled:opacity-50"
+              className="mt-3 rounded-lg border border-teal-700 bg-neutral-900 px-4 py-2 text-sm font-semibold text-teal-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
             >
               {importing ? "Importing…" : "Import"}
             </button>
@@ -322,24 +308,24 @@ export default function OnboardingPage() {
         </div>
 
         {notice ? (
-          <p className="rounded-lg border border-slate-800 bg-slate-900 p-3 text-xs text-slate-300">
+          <p className="rounded-lg border border-neutral-800 bg-neutral-950 p-3 text-xs text-neutral-300">
             {notice}
           </p>
         ) : null}
 
         {/* Saved state */}
         {savedCount !== null ? (
-          <section className="rounded-xl border border-emerald-800/60 bg-emerald-950/30 p-5">
-            <h2 className="text-base font-semibold text-emerald-200">
+          <section className="rounded-xl border border-teal-800/60 bg-teal-950/30 p-5">
+            <h2 className="text-base font-semibold text-teal-200">
               {savedCount === 1 ? "1 memory saved" : `${savedCount} memories saved`}
             </h2>
-            <p className="mt-2 text-sm text-emerald-100/80">
+            <p className="mt-2 text-sm text-teal-100/80">
               They are part of your memory now and can be recalled in chat.
             </p>
             <button
               type="button"
               onClick={() => router.push("/")}
-              className="mt-4 rounded-md border border-emerald-700 bg-emerald-900/60 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900"
+              className="mt-4 rounded-lg border border-teal-700 bg-neutral-900 px-4 py-2 text-sm font-semibold text-teal-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
             >
               Go to chat
             </button>
@@ -348,16 +334,16 @@ export default function OnboardingPage() {
 
         {/* Review state */}
         {savedCount === null && result ? (
-          <section className="flex flex-col gap-4 rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <section className="flex flex-col gap-4 rounded-xl border border-neutral-800 bg-neutral-950 p-5">
             <div>
-              <h2 className="text-base font-semibold text-white">Review before saving</h2>
-              <p className="mt-1 text-sm text-slate-400">
+              <h2 className="text-base font-semibold text-neutral-100">Review before saving</h2>
+              <p className="mt-1 text-sm text-neutral-400">
                 Check the memories you want to keep. Nothing has been saved yet.
               </p>
             </div>
 
             {result.duplicates_skipped > 0 ? (
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-neutral-400">
                 {result.duplicates_skipped} item
                 {result.duplicates_skipped === 1 ? "" : "s"} skipped as duplicates.
               </p>
@@ -372,18 +358,18 @@ export default function OnboardingPage() {
             ) : null}
 
             {candidateIds.length === 0 ? (
-              <p className="text-sm text-slate-500">No memories were found in that text.</p>
+              <p className="text-sm text-neutral-500">No memories were found in that text.</p>
             ) : (
               <div className="flex flex-col gap-4">
                 {groupEntries.map(([group, items]) => (
                   <div key={group}>
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
                       {group}
                     </h3>
                     <ul className="mt-2 flex flex-col gap-2">
                       {items.map((item) => (
                         <li key={item.record_id}>
-                          <label className="flex cursor-pointer items-start gap-2 rounded-md border border-slate-800 bg-slate-950 p-3">
+                          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-neutral-800 bg-neutral-900 p-3">
                             <input
                               type="checkbox"
                               checked={Boolean(checked[item.record_id])}
@@ -396,10 +382,10 @@ export default function OnboardingPage() {
                               className="mt-0.5"
                             />
                             <span className="flex-1">
-                              <span className="block whitespace-pre-wrap text-sm text-slate-100">
+                              <span className="block whitespace-pre-wrap text-sm text-neutral-100">
                                 {item.content}
                               </span>
-                              <span className="mt-1 block text-xs text-slate-500">
+                              <span className="mt-1 block text-xs text-neutral-500">
                                 {item.kind} · {item.certainty}
                               </span>
                             </span>
@@ -423,7 +409,7 @@ export default function OnboardingPage() {
                 type="button"
                 onClick={handleSave}
                 disabled={saving || selectedIds.length === 0}
-                className="rounded-md border border-emerald-700 bg-emerald-900/60 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900 disabled:opacity-50"
+                className="rounded-lg border border-teal-700 bg-neutral-900 px-4 py-2 text-sm font-semibold text-teal-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
               >
                 {saving ? "Saving…" : `Save selected (${selectedIds.length})`}
               </button>
@@ -431,14 +417,14 @@ export default function OnboardingPage() {
                 type="button"
                 onClick={handleDiscard}
                 disabled={saving}
-                className="rounded-md border border-slate-700 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                className="rounded-lg border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
               >
                 Discard import
               </button>
             </div>
           </section>
         ) : null}
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }

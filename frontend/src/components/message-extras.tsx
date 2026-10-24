@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import type {
   FollowupResponse,
@@ -21,6 +21,7 @@ type MessageExtrasProps = {
   busy: boolean;
   onRecord: (recordId: number, action: "save" | "discard") => void;
   onTask: (index: number, action: "save" | "discard") => void;
+  actions?: ReactNode;
 };
 
 /** "20 Oct 2026", or null when there is no usable timestamp. */
@@ -238,10 +239,20 @@ function PendingTasks({
   );
 }
 
-function TraceDisclosure({ trace }: { trace: TraceInfo }) {
+function TraceDisclosure({ trace, actions }: { trace: TraceInfo; actions?: ReactNode }) {
   return (
     <details className="mt-2 text-xs text-slate-500">
-      <summary className="cursor-pointer select-none hover:text-slate-400">Trace</summary>
+      <summary className="cursor-pointer select-none hover:text-slate-400">
+        <div className="flex items-center justify-between gap-2">
+          <span>Trace</span>
+          <span
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+          >
+            {actions}
+          </span>
+        </div>
+      </summary>
       <div className="mt-1 space-y-0.5 font-mono">
         <p>retrieval_ran: {trace.retrieval_ran ? "true" : "false"}</p>
         <p>candidates_considered: {trace.candidates_considered}</p>
@@ -270,6 +281,7 @@ export function MessageExtras({
   busy,
   onRecord,
   onTask,
+  actions,
 }: MessageExtrasProps) {
   const notice = followup?.status === "ready" ? contradictionNotice(followup.intervention) : null;
 
@@ -293,7 +305,11 @@ export function MessageExtras({
           />
         </>
       ) : null}
-      {trace ? <TraceDisclosure trace={trace} /> : null}
+      {trace ? (
+        <TraceDisclosure trace={trace} actions={actions} />
+      ) : actions ? (
+        <div className="mt-2 flex items-center justify-end">{actions}</div>
+      ) : null}
     </>
   );
 }

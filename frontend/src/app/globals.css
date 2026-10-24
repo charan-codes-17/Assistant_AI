@@ -3,6 +3,12 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /* Motion tokens: one place to keep every interactive surface settling at the same speed. */
+  --dur-hover: 140ms; /* pointer hover in/out */
+  --dur-press: 100ms; /* press feedback is shorter so a tap reads as immediate */
+  --dur-settle: 200ms; /* content entering or leaving */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1); /* decelerating ease; never linear */
 }
 
 @theme inline {
@@ -22,4 +28,67 @@
 body {
   background: var(--background);
   color: var(--foreground);
+}
+
+/* Reduced motion: drop movement only. Animations resolve to their final frame immediately and
+   every transform is removed, so press-scale and fade-rise land instantly, while colour and
+   opacity transitions keep their normal timing. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* Subtle entrance for freshly rendered panes; the 10px lift keeps it from feeling like a bounce. */
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-rise {
+  /* 280ms reads clearly as an entrance without holding the eye; fill-mode "both" holds the end
+     frame so nothing snaps back after the animation finishes. */
+  animation: fade-rise 280ms var(--ease-out) both;
+}
+
+/* Slim dark scrollbar for the message scroller; keeps the rail unobtrusive on a dark surface. */
+.chat-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #404040 transparent;
+}
+
+/* Thinking indicator: three dots that rise slightly in sequence. Only opacity and transform move. */
+@keyframes thinking-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.animate-thinking-dot {
+  animation: thinking-dot 1.2s var(--ease-out) infinite;
+}
+
+/* Reduced motion: keep the dots visible but static instead of pulsing. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-thinking-dot {
+    animation: none;
+    opacity: 0.6;
+  }
 }

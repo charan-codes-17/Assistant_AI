@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { AppShell } from "@/components/app-shell";
 import {
   ApiError,
   AuthError,
@@ -27,6 +27,13 @@ const KIND_LABELS: Record<string, string> = {
   preference: "Preferences",
   glossary: "Glossary",
 };
+
+const KIND_CHIP_ORDER = [...KIND_ORDER, "other"] as const;
+
+/** Map any unknown kind to the shared "other" bucket for grouping and filtering. */
+function normalizeKind(kind: string): string {
+  return (KIND_ORDER as readonly string[]).includes(kind) ? kind : "other";
+}
 
 type StatusView = "confirmed" | "pending";
 
@@ -111,6 +118,9 @@ export default function MemoriesPage() {
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
+  const [kindFilter, setKindFilter] = useState<string>("all");
+  const [search, setSearch] = useState("");
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -161,6 +171,17 @@ export default function MemoriesPage() {
       void load(view);
     }
   }, [ready, view, load]);
+
+  // If the selected kind disappears from the current tab, fall back to "All".
+  useEffect(() => {
+    if (kindFilter === "all") {
+      return;
+    }
+    const present = items?.some((item) => normalizeKind(item.kind) === kindFilter) ?? false;
+    if (!present) {
+      setKindFilter("all");
+    }
+  }, [items, kindFilter]);
 
   async function handleSaveRecord(recordId: number) {
     setBusyId(recordId);
@@ -229,53 +250,62 @@ export default function MemoriesPage() {
 
   if (!ready) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 p-6 text-sm text-slate-500">
+      <div className="flex min-h-screen items-center justify-center bg-black p-6 text-sm text-neutral-500">
         Loading…
       </div>
     );
   }
 
-  const groups = items ? groupByKind(items) : [];
+  const tabItems = items ?? [];
+  const kindCounts = new Map<string, number>();
+  for (const item of tabItems) {
+    const key = normalizeKind(item.kind);
+    kindCounts.set(key, (kindCounts.get(key) ?? 0) + 1);
+  }
+  const kindChips = KIND_CHIP_ORDER.filter((key) => (kindCounts.get(key) ?? 0) > 0).map((key) => ({
+    key,
+    label: key === "other" ? "Other" : KIND_LABELS[key],
+    count: kindCounts.get(key) ?? 0,
+  }));
+  const activeKind =
+    kindFilter !== "all" && !kindCounts.has(kindFilter) ? "all" : kindFilter;
+  const query = search.trim().toLowerCase();
+  const kindScoped =
+    activeKind === "all"
+      ? tabItems
+      : tabItems.filter((item) => normalizeKind(item.kind) === activeKind);
+  const visible = query
+    ? kindScoped.filter((item) => item.content.toLowerCase().includes(query))
+    : kindScoped;
+  const groups: Group[] =
+    activeKind === "all"
+      ? groupByKind(visible)
+      : visible.length > 0
+        ? [
+            {
+              key: activeKind,
+              label: "",
+              items: visible
+                .slice()
+                .sort(
+                  (a, b) =>
+                    parseTimestamp(b.created_at).getTime() -
+                    parseTimestamp(a.created_at).getTime(),
+                ),
+            },
+          ]
+        : [];
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
-          <span className="text-sm font-semibold tracking-tight text-white">
-            Personal Memory Assistant
-          </span>
-        </div>
-        <div className="flex gap-2">
-          <Link
-            href="/"
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-          >
-            Chat
-          </Link>
-          <Link
-            href="/tasks"
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-          >
-            Tasks
-          </Link>
-          <span
-            aria-current="page"
-            className="rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100"
-          >
-            Memories
-          </span>
-        </div>
-      </header>
-
-      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 py-6">
+    <AppShell activeHref="/memories">
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-6 py-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-xl font-bold tracking-tight text-white">My memories</h1>
+          <h1 className="text-xl font-bold tracking-tight text-neutral-100">My memories</h1>
           <button
             type="button"
             onClick={() => void load(view)}
             disabled={loading}
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600 disabled:opacity-50"
+            className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
           >
             Refresh
           </button>
@@ -288,8 +318,8 @@ export default function MemoriesPage() {
             aria-pressed={view === "confirmed"}
             className={
               view === "confirmed"
-                ? "rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100"
-                : "rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
+                ? "rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs font-semibold text-neutral-100"
+                : "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
             }
           >
             Confirmed
@@ -300,19 +330,71 @@ export default function MemoriesPage() {
             aria-pressed={view === "pending"}
             className={
               view === "pending"
-                ? "rounded-md border border-amber-700 bg-amber-900/50 px-3 py-1.5 text-xs font-semibold text-amber-100"
-                : "rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
+                ? "rounded-lg border border-amber-700 bg-amber-900/50 px-3 py-1.5 text-xs font-semibold text-amber-100"
+                : "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
             }
           >
             Pending
           </button>
         </div>
 
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-neutral-500">
           {view === "confirmed"
             ? "Confirmed: these memories are used when you chat."
             : "Pending: saved as candidates. Each one is used only after you press Save."}
         </p>
+
+        <div className="flex flex-col gap-2">
+          <div className="relative">
+            <input
+              type="text"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search memories"
+              aria-label="Search memories"
+              className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 pr-8 text-xs text-neutral-100 placeholder:text-neutral-500 outline-none focus:border-neutral-600 focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+            />
+            {search ? (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-sm leading-none text-neutral-500 transition-[color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:text-neutral-200 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setKindFilter("all")}
+              aria-pressed={activeKind === "all"}
+              className={
+                activeKind === "all"
+                  ? "rounded-lg border border-teal-700 bg-teal-900/40 px-3 py-1.5 text-xs font-semibold text-teal-100 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-teal-900/60 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+                  : "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+              }
+            >
+              All {tabItems.length}
+            </button>
+            {kindChips.map((chip) => (
+              <button
+                key={chip.key}
+                type="button"
+                onClick={() => setKindFilter(chip.key)}
+                aria-pressed={activeKind === chip.key}
+                className={
+                  activeKind === chip.key
+                    ? "rounded-lg border border-teal-700 bg-teal-900/40 px-3 py-1.5 text-xs font-semibold text-teal-100 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-teal-900/60 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+                    : "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+                }
+              >
+                {chip.label} {chip.count}
+              </button>
+            ))}
+          </div>
+        </div>
 
         {actionError ? (
           <p role="alert" className="rounded-lg border border-rose-800/60 bg-rose-950/30 p-3 text-xs text-rose-300">
@@ -320,7 +402,7 @@ export default function MemoriesPage() {
           </p>
         ) : null}
 
-        {loading ? <p className="text-sm text-slate-500">Loading…</p> : null}
+        {loading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
 
         {!loading && loadError ? (
           <div className="flex flex-col items-start gap-3 rounded-lg border border-rose-800/60 bg-rose-950/30 p-4">
@@ -330,7 +412,7 @@ export default function MemoriesPage() {
             <button
               type="button"
               onClick={() => void load(view)}
-              className="rounded-md border border-rose-700 bg-rose-900/50 px-3 py-1.5 text-xs font-medium text-rose-100"
+              className="rounded-lg border border-rose-700 bg-rose-900/50 px-3 py-1.5 text-xs font-medium text-rose-100 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-rose-900/70 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
             >
               Try again
             </button>
@@ -338,16 +420,34 @@ export default function MemoriesPage() {
         ) : null}
 
         {!loading && !loadError && items !== null && items.length === 0 ? (
-          <p className="text-sm text-slate-500">No memories here yet</p>
+          <p className="text-sm text-neutral-500">No memories here yet</p>
+        ) : null}
+
+        {!loading && !loadError && tabItems.length > 0 && visible.length === 0 ? (
+          <div className="flex flex-col items-start gap-3 rounded-lg border border-neutral-800 bg-neutral-950 p-4">
+            <p className="text-sm text-neutral-400">No memories match</p>
+            <button
+              type="button"
+              onClick={() => {
+                setKindFilter("all");
+                setSearch("");
+              }}
+              className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+            >
+              Clear filters
+            </button>
+          </div>
         ) : null}
 
         {!loading && !loadError && groups.length > 0 ? (
           <div className="flex flex-col gap-6">
             {groups.map((group) => (
               <section key={group.key} className="flex flex-col gap-3">
-                <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  {group.label}
-                </h2>
+                {group.label ? (
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    {group.label}
+                  </h2>
+                ) : null}
                 <ul className="flex flex-col gap-3">
                   {group.items.map((item) => {
                     const isPending = item.status !== "confirmed";
@@ -356,7 +456,7 @@ export default function MemoriesPage() {
                     return (
                       <li
                         key={item.id}
-                        className="rounded-xl border border-slate-800 bg-slate-900 p-4"
+                        className="rounded-xl border border-neutral-800 bg-neutral-950 p-4"
                       >
                         {isPending ? (
                           <p className="mb-2 inline-block rounded border border-amber-700 bg-amber-900/40 px-2 py-0.5 text-xs font-medium text-amber-200">
@@ -371,9 +471,9 @@ export default function MemoriesPage() {
                               onChange={(event) => setEditText(event.target.value)}
                               maxLength={MEMORY_EDIT_MAX}
                               aria-label="Edit memory text"
-                              className="h-28 w-full resize-y rounded-md border border-slate-700 bg-slate-950 p-2 text-sm text-slate-100 outline-none focus:border-emerald-700"
+                              className="h-28 w-full resize-y rounded-lg border border-neutral-800 bg-neutral-900 p-2 text-sm text-neutral-100 outline-none focus:border-teal-600"
                             />
-                            <div className="flex items-center justify-between text-xs text-slate-500">
+                            <div className="flex items-center justify-between text-xs text-neutral-500">
                               <span>Edits are saved as you confirm.</span>
                               <span>
                                 {editText.length} / {MEMORY_EDIT_MAX}
@@ -384,7 +484,7 @@ export default function MemoriesPage() {
                                 type="button"
                                 onClick={() => void handleEditSave(item.id)}
                                 disabled={isBusy}
-                                className="rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-900 disabled:opacity-50"
+                                className="rounded-lg border border-teal-700 bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-teal-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
                               >
                                 {isBusy ? "Saving…" : "Save"}
                               </button>
@@ -395,7 +495,7 @@ export default function MemoriesPage() {
                                   setEditText("");
                                 }}
                                 disabled={isBusy}
-                                className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                                className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
                               >
                                 Cancel
                               </button>
@@ -403,11 +503,11 @@ export default function MemoriesPage() {
                           </div>
                         ) : (
                           <>
-                            <p className="whitespace-pre-wrap text-sm text-slate-100">
+                            <p className="whitespace-pre-wrap text-sm text-neutral-100">
                               {item.content}
                             </p>
 
-                            <p className="mt-2 text-xs text-slate-400">
+                            <p className="mt-2 text-xs text-neutral-400">
                               {item.kind === "other" ? "Other" : KIND_LABELS[item.kind] ?? titleCase(item.kind)}
                               {" · "}
                               {titleCase(item.certainty)}
@@ -418,31 +518,31 @@ export default function MemoriesPage() {
                             </p>
 
                             {item.kind === "decision" && item.rationale ? (
-                              <p className="mt-1 text-xs text-slate-400">
+                              <p className="mt-1 text-xs text-neutral-400">
                                 Reason: {item.rationale}
                               </p>
                             ) : null}
 
                             {expandedId === item.id ? (
-                              <dl className="mt-2 flex flex-col gap-1 rounded-md border border-slate-800 bg-slate-950 p-2 text-xs text-slate-400">
+                              <dl className="mt-2 flex flex-col gap-1 rounded-lg border border-neutral-800 bg-neutral-900 p-2 text-xs text-neutral-400">
                                 <div>
-                                  <dt className="inline font-medium text-slate-500">Source: </dt>
+                                  <dt className="inline font-medium text-neutral-500">Source: </dt>
                                   <dd className="inline">{titleCase(item.source)}</dd>
                                 </div>
                                 {item.source_ref ? (
                                   <div>
-                                    <dt className="inline font-medium text-slate-500">
+                                    <dt className="inline font-medium text-neutral-500">
                                       Source reference:{" "}
                                     </dt>
                                     <dd className="inline whitespace-pre-wrap">{item.source_ref}</dd>
                                   </div>
                                 ) : null}
                                 <div>
-                                  <dt className="inline font-medium text-slate-500">Certainty: </dt>
+                                  <dt className="inline font-medium text-neutral-500">Certainty: </dt>
                                   <dd className="inline">{titleCase(item.certainty)}</dd>
                                 </div>
                                 <div>
-                                  <dt className="inline font-medium text-slate-500">Created: </dt>
+                                  <dt className="inline font-medium text-neutral-500">Created: </dt>
                                   <dd className="inline">{formatDate(item.created_at)}</dd>
                                 </div>
                               </dl>
@@ -454,7 +554,7 @@ export default function MemoriesPage() {
                                   type="button"
                                   onClick={() => void handleSaveRecord(item.id)}
                                   disabled={isBusy}
-                                  className="rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-900 disabled:opacity-50"
+                                  className="rounded-lg border border-teal-700 bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-teal-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
                                 >
                                   {isBusy ? "Saving…" : "Save"}
                                 </button>
@@ -467,7 +567,7 @@ export default function MemoriesPage() {
                                   setConfirmingDeleteId(null);
                                 }}
                                 disabled={isBusy}
-                                className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                                className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
                               >
                                 Edit
                               </button>
@@ -475,7 +575,7 @@ export default function MemoriesPage() {
                                 type="button"
                                 onClick={() => setExpandedId(expandedId === item.id ? null : item.id)}
                                 aria-expanded={expandedId === item.id}
-                                className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
+                                className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
                               >
                                 {expandedId === item.id ? "Hide source" : "Show source"}
                               </button>
@@ -488,7 +588,7 @@ export default function MemoriesPage() {
                                     type="button"
                                     onClick={() => void handleDelete(item.id)}
                                     disabled={isBusy}
-                                    className="rounded-md border border-rose-700 bg-rose-900/50 px-3 py-1.5 text-xs font-semibold text-rose-100 disabled:opacity-50"
+                                    className="rounded-lg border border-rose-700 bg-rose-900/50 px-3 py-1.5 text-xs font-semibold text-rose-100 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-rose-900/70 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
                                   >
                                     {isBusy ? "Deleting…" : "Confirm delete"}
                                   </button>
@@ -496,7 +596,7 @@ export default function MemoriesPage() {
                                     type="button"
                                     onClick={() => setConfirmingDeleteId(null)}
                                     disabled={isBusy}
-                                    className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                                    className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
                                   >
                                     Cancel
                                   </button>
@@ -509,7 +609,7 @@ export default function MemoriesPage() {
                                     setEditingId(null);
                                   }}
                                   disabled={isBusy}
-                                  className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-rose-300 hover:border-rose-700 disabled:opacity-50"
+                                  className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-rose-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:border-rose-700 hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
                                 >
                                   Delete
                                 </button>
@@ -525,7 +625,7 @@ export default function MemoriesPage() {
             ))}
           </div>
         ) : null}
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }
