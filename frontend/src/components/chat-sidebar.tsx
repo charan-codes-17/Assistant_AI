@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { CONVERSATION_TITLE_MAX, type ConversationOut } from "@/lib/api";
 
@@ -34,23 +34,27 @@ type ConversationGroup = {
   items: ConversationOut[];
 };
 
+// Local-day boundaries for grouping, computed once on mount in an effect (never during render).
+type TimeBounds = {
+  todayStart: number;
+  weekStart: number;
+};
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-function startOfLocalDay(value: Date): number {
-  return new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
-}
-
-/** Today / Previous 7 days / Older, using updated_at in the viewer's local time. */
-function groupConversations(items: ConversationOut[], now: Date): ConversationGroup[] {
-  const todayStart = startOfLocalDay(now);
-  const weekStart = todayStart - 7 * DAY_MS;
+/**
+ * Today / Previous 7 days / Older, using updated_at in the viewer's local time. `bounds` is
+ * produced by the mount effect, so this runs only after the current time is known.
+ */
+function groupConversations(items: ConversationOut[], bounds: TimeBounds): ConversationGroup[] {
+  const { todayStart, weekStart } = bounds;
   const today: ConversationOut[] = [];
   const week: ConversationOut[] = [];
   const older: ConversationOut[] = [];
 
   for (const item of items) {
-    const parsed = new Date(item.updated_at);
-    const time = Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+    const parsed = Date.parse(item.updated_at);
+    const time = Number.isNaN(parsed) ? 0 : parsed;
     if (time >= todayStart) {
       today.push(item);
     } else if (time >= weekStart) {
@@ -92,8 +96,19 @@ export function ChatSidebar({
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Set once on mount. Null during prerender and the first client render, so grouping waits.
+  const [bounds, setBounds] = useState<TimeBounds | null>(null);
 
-  const now = useMemo(() => new Date(), []);
+  useEffect(() => {
+    const current = new Date();
+    const todayStart = new Date(
+      current.getFullYear(),
+      current.getMonth(),
+      current.getDate(),
+    ).getTime();
+    setBounds({ todayStart, weekStart: todayStart - 7 * DAY_MS });
+  }, []);
+
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) {
@@ -101,7 +116,12 @@ export function ChatSidebar({
     }
     return conversations.filter((item) => item.title.toLowerCase().includes(needle));
   }, [conversations, query]);
-  const groups = useMemo(() => groupConversations(filtered, now), [filtered, now]);
+  // Until the mount effect has run, `bounds` is null and the list renders as one flat section
+  // (newest first, no headings). Once known, it is split into Today / Previous 7 days / Older.
+  const groups = useMemo<ConversationGroup[]>(
+    () => (bounds ? groupConversations(filtered, bounds) : [{ label: "", items: filtered }]),
+    [filtered, bounds],
+  );
 
   const startRename = (item: ConversationOut) => {
     setConfirmingId(null);
@@ -203,10 +223,12 @@ export function ChatSidebar({
           <p className="px-2 py-3 text-xs text-slate-500">No chats match your search</p>
         ) : (
           groups.map((group) => (
-            <div key={group.label} className="mt-1">
-              <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
-                {group.label}
-              </p>
+            <div key={group.label || "all"} className="mt-1">
+              {group.label ? (
+                <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
+                  {group.label}
+                </p>
+              ) : null}
               <ul className="space-y-0.5">
                 {group.items.map((item) => {
                   const active = item.id === activeId;
