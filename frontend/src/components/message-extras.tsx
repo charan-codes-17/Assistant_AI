@@ -239,19 +239,12 @@ function PendingTasks({
   );
 }
 
-function TraceDisclosure({ trace, actions }: { trace: TraceInfo; actions?: ReactNode }) {
+function TraceDisclosure({ trace }: { trace: TraceInfo }) {
   return (
     <details className="mt-2 text-xs text-slate-500">
-      <summary className="cursor-pointer select-none hover:text-slate-400">
-        <div className="flex items-center justify-between gap-2">
-          <span>Trace</span>
-          <span
-            onClick={(event) => event.stopPropagation()}
-            onKeyDown={(event) => event.stopPropagation()}
-          >
-            {actions}
-          </span>
-        </div>
+      <summary className="trace-summary inline-flex cursor-pointer select-none items-center gap-1.5 hover:text-slate-400">
+        <span aria-hidden="true" className="trace-marker" />
+        <span>Trace</span>
       </summary>
       <div className="mt-1 space-y-0.5 font-mono">
         <p>retrieval_ran: {trace.retrieval_ran ? "true" : "false"}</p>
@@ -287,6 +280,7 @@ export function MessageExtras({
 
   return (
     <>
+      {actions ? <div className="mt-2 flex items-center gap-2">{actions}</div> : null}
       <Inspector items={memoryUsed} />
       {notice ? <Notice text={notice.text} question={notice.question} /> : null}
       {followup?.status === "ready" ? (
@@ -305,11 +299,7 @@ export function MessageExtras({
           />
         </>
       ) : null}
-      {trace ? (
-        <TraceDisclosure trace={trace} actions={actions} />
-      ) : actions ? (
-        <div className="mt-2 flex items-center justify-end">{actions}</div>
-      ) : null}
+      {trace ? <TraceDisclosure trace={trace} /> : null}
     </>
   );
 }

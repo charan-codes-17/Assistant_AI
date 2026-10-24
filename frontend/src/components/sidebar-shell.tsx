@@ -12,6 +12,10 @@ import { useState, type ReactNode } from "react";
  *
  * activeHref marks the matching nav row with a teal bar and aria-current; it is optional so the
  * chat page keeps rendering the rail with no row marked.
+ *
+ * The Recents section (label + scrollable list) renders only when children are supplied: only the
+ * chat page has a conversation list, so the non-chat pages show title, New chat, nav and the user
+ * block with the spacer in between.
  */
 
 type SidebarShellProps = {
@@ -20,7 +24,7 @@ type SidebarShellProps = {
   onLogout: () => void;
   onCollapse?: () => void;
   activeHref?: string;
-  children: ReactNode;
+  children?: ReactNode;
 };
 
 function PencilIcon() {
@@ -150,6 +154,8 @@ export function SidebarShell({
 }: SidebarShellProps) {
   const [recentsOpen, setRecentsOpen] = useState(true);
   const initial = username && username.length > 0 ? username.charAt(0).toUpperCase() : "U";
+  // Only the chat page supplies a conversation list; without it there is nothing to toggle.
+  const hasRecents = children !== undefined && children !== null;
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col border-r border-neutral-800 bg-neutral-950 md:w-52">
@@ -206,17 +212,21 @@ export function SidebarShell({
       </nav>
 
       <div className="mt-4 flex min-h-0 flex-1 flex-col">
-        <button
-          type="button"
-          onClick={() => setRecentsOpen((value) => !value)}
-          aria-expanded={recentsOpen}
-          className="flex items-center gap-1 rounded-md px-4 py-1 text-xs font-medium uppercase tracking-wide text-neutral-500 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-900 hover:text-neutral-300 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
-        >
-          <ChevronIcon open={recentsOpen} />
-          Recents
-        </button>
-        {recentsOpen ? (
-          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">{children}</div>
+        {hasRecents ? (
+          <>
+            <button
+              type="button"
+              onClick={() => setRecentsOpen((value) => !value)}
+              aria-expanded={recentsOpen}
+              className="flex items-center gap-1 rounded-md px-4 py-1 text-xs font-medium uppercase tracking-wide text-neutral-500 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-900 hover:text-neutral-300 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+            >
+              <ChevronIcon open={recentsOpen} />
+              Recents
+            </button>
+            {recentsOpen ? (
+              <div className="chat-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-2">{children}</div>
+            ) : null}
+          </>
         ) : null}
       </div>
 

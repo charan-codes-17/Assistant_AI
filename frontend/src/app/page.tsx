@@ -47,6 +47,31 @@ const HISTORY_CONTENT_MAX = 2000;
 const POLL_INTERVAL_MS = 1000;
 const POLL_TIMEOUT_MS = 30000;
 
+// Symbol that only shows up in math-ish lines.
+const EQUATION_MARKERS = /[∫∑√→=^]/;
+// Operators that matter when a line has digits but no explicit math symbol.
+const EQUATION_OPERATORS = /[+\-*/×÷()]/;
+
+/**
+ * Render-only heuristic for reply lines: replies are plain text, so equation lines are detected
+ * by their maths symbols, or by digits plus operators with almost no prose. Prose lines are left
+ * untouched.
+ */
+function isEquationLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) {
+    return false;
+  }
+  if (EQUATION_MARKERS.test(trimmed)) {
+    return true;
+  }
+  if (!/\d/.test(trimmed) || !EQUATION_OPERATORS.test(trimmed)) {
+    return false;
+  }
+  const words = trimmed.split(/\s+/).filter((token) => /[A-Za-z]{2,}/.test(token));
+  return words.length <= 3;
+}
+
 type Message = {
   id: string;
   role: "user" | "assistant";
@@ -714,13 +739,7 @@ export default function ChatPage() {
               messages.length === 0 ? "flex-none" : "min-h-0 flex-1 overflow-y-auto"
             }`}
           >
-            {messages.length === 0 ? (
-              <div className="animate-fade-rise flex flex-col items-center gap-4 px-4 py-6">
-                <h1 className="text-3xl font-semibold text-neutral-100">
-                  {me ? `Hello, ${me?.username ?? ""}` : "Hello"}
-                </h1>
-              </div>
-            ) : (
+            {messages.length === 0 ? null : (
               <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
                 {messages.map((message) =>
                   message.role === "user" ? (
@@ -738,16 +757,24 @@ export default function ChatPage() {
                       className={`flex justify-start ${message.live ? "animate-fade-rise" : ""}`}
                     >
                       <div className="w-full max-w-[92%]">
-                        <p className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
-                          {message.content}
-                        </p>
+                        <div className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
+                          {message.content.split(/\r?\n/).map((line, index) => (
+                            <span
+                              key={index}
+                              className={isEquationLine(line) ? "reply-line reply-equation" : "reply-line"}
+                            >
+                              {line}
+                            </span>
+                          ))}
+                        </div>
                         <MessageExtras
                           actions={
                             <button
                               type="button"
                               onClick={() => void handleCopy(message.id, message.content)}
-                              aria-label="Copy reply text"
-                              className="mt-1 inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-neutral-500 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-900 hover:text-neutral-300 active:scale-[0.97] active:duration-[var(--dur-press)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+                              aria-label="Copy reply"
+                              title="Copy reply"
+                              className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-neutral-500 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-900 hover:text-neutral-300 active:scale-[0.97] active:duration-[var(--dur-press)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
                             >
                               <svg
                                 viewBox="0 0 24 24"
@@ -766,7 +793,7 @@ export default function ChatPage() {
                                 ? "Copied"
                                 : copyState[message.id] === "failed"
                                   ? "Copy failed"
-                                  : "Copy"}
+                                  : null}
                             </button>
                           }
                           memoryUsed={message.memoryUsed}
@@ -814,6 +841,14 @@ export default function ChatPage() {
               messages.length === 0 ? "max-w-2xl" : "max-w-3xl"
             }`}
           >
+            {messages.length === 0 ? (
+              <div className="animate-fade-rise absolute inset-x-0 bottom-full flex flex-col items-center gap-4 px-4 py-6">
+                <h1 className="text-3xl font-normal text-neutral-100">
+                  {me ? `Hello, ${me?.username ?? ""}` : "Hello"}
+                </h1>
+              </div>
+            ) : null}
+
             {messages.length > 0 ? (
               <div
                 aria-hidden="true"

@@ -67,6 +67,52 @@ body {
   scrollbar-color: #404040 transparent;
 }
 
+/* Assistant replies are plain text rendered one block per source line. An empty line keeps its
+   full height through a generated space, so blank lines survive without touching the text. */
+.reply-line {
+  display: block;
+}
+
+.reply-line:empty::before {
+  content: "\00a0";
+}
+
+/* Equation-like lines get room to breathe and a maths-friendly stack, and scroll sideways
+   instead of widening the reply column. */
+.reply-equation {
+  margin-block: 0.25rem;
+  overflow-x: auto;
+  font-family: "Cambria Math", "STIX Two Math", "Segoe UI Symbol", ui-serif, Georgia, serif;
+  font-size: 1.1em;
+  line-height: 1.7;
+  color: #f5f5f5;
+}
+
+/* The trace summary is an inline-flex row, so the native marker is replaced by a CSS triangle
+   that rotates when the disclosure opens. `rotate` (not `transform`) keeps the indicator alive
+   under the global reduced-motion transform reset. */
+.trace-summary {
+  list-style: none;
+}
+
+.trace-summary::-webkit-details-marker {
+  display: none;
+}
+
+.trace-marker {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transition: rotate var(--dur-hover) var(--ease-out);
+}
+
+details[open] > summary.trace-summary .trace-marker {
+  rotate: 90deg;
+}
+
 /* Thinking indicator: three dots that rise slightly in sequence. Only opacity and transform move. */
 @keyframes thinking-dot {
   0%,

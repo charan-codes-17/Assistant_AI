@@ -62,25 +62,19 @@ export function AppShell({ activeHref, children }: AppShellProps) {
     router.push("/");
   }, [router]);
 
-  const railChildren = (
-    <p className="px-3 py-3 text-xs text-neutral-500">Open a chat from the home page.</p>
-  );
-
   return (
-    <div className="flex min-h-screen bg-black text-neutral-200">
+    <div className="flex h-dvh overflow-hidden bg-black text-neutral-200">
       <aside className="hidden shrink-0 md:flex">
         <SidebarShell
           username={username}
           onNewChat={handleNewChat}
           onLogout={handleLogout}
           activeHref={activeHref}
-        >
-          {railChildren}
-        </SidebarShell>
+        />
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex items-center border-b border-neutral-800 px-3 py-2 md:hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div className="flex shrink-0 items-center border-b border-neutral-800 px-3 py-2 md:hidden">
           <button
             type="button"
             onClick={() => setDrawerOpen(true)}
@@ -91,7 +85,11 @@ export function AppShell({ activeHref, children }: AppShellProps) {
           </button>
         </div>
 
-        <main className="flex min-w-0 flex-1 flex-col">{children}</main>
+        {/* The page body is its own scroll container, so the rail and the mobile header stay put
+            while long pages scroll. It is a block container on purpose: every page wrapper uses
+            flex-1, and a flex parent would clamp it to the viewport height and drop its bottom
+            padding, because flex-basis: 0 ignores the content height. */}
+        <main className="chat-scroll min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
 
       {drawerOpen ? (
@@ -108,9 +106,7 @@ export function AppShell({ activeHref, children }: AppShellProps) {
               onLogout={handleLogout}
               onCollapse={() => setDrawerOpen(false)}
               activeHref={activeHref}
-            >
-              {railChildren}
-            </SidebarShell>
+            />
           </div>
         </div>
       ) : null}
