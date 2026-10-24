@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { MessageExtras, type RecordState, type TaskState } from "@/components/message-extras";
@@ -71,6 +70,7 @@ export default function ChatPage() {
   const [conversationsError, setConversationsError] = useState(false);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
 
   // Bumped on unmount-less resets (new session / logout): any poller from an older generation
   // stops as soon as it notices the change.
@@ -533,7 +533,7 @@ export default function ChatPage() {
   const disabled = sending || sessionId === null;
 
   return (
-    <div className="flex min-h-screen bg-slate-950 text-slate-100">
+    <div className="flex min-h-screen bg-black text-neutral-200">
       <ChatSidebar
         conversations={conversations}
         activeId={activeConversationId}
@@ -543,138 +543,184 @@ export default function ChatPage() {
         onOpenChange={setSidebarOpen}
         onRetry={() => void refreshConversations(true)}
         onSelect={(id) => void handleSelectConversation(id)}
-        onNewChat={handleNewChat}
+        onNewChat={handleNewSession}
         onRename={handleRenameConversation}
         onDelete={handleDeleteConversation}
+        username={me?.username ?? null}
+        onLogout={handleLogout}
+        collapsed={collapsed}
+        onCollapse={() => setCollapsed(true)}
       />
 
-      <div className="flex min-h-screen flex-1 flex-col">
+      <div className="flex min-h-screen flex-1 flex-col bg-black">
         <div className="border-b border-amber-800/60 bg-amber-950/40 px-4 py-2 text-center text-xs text-amber-300">
           {BANNER}
         </div>
 
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center border-b border-neutral-800 px-3 py-2 md:hidden">
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(true)}
+            aria-label="Open chats"
+            className="rounded-md border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 hover:border-neutral-700"
+          >
+            Menu
+          </button>
+        </div>
+
+        {collapsed ? (
+          <div className="hidden border-b border-neutral-800 px-3 py-2 md:block">
             <button
               type="button"
-              onClick={() => setSidebarOpen(true)}
-              aria-label="Open chats"
-              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600 md:hidden"
+              onClick={() => setCollapsed(false)}
+              aria-label="Open sidebar"
+              className="rounded-md border border-neutral-800 bg-neutral-900 px-2.5 py-1.5 text-xs font-medium text-neutral-300 hover:border-neutral-700"
             >
-              Chats
-            </button>
-            <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
-            <span className="text-sm font-semibold tracking-tight text-white">
-              Personal Memory Assistant
-            </span>
-            {me ? (
-              <span className="text-xs text-slate-500">{me.username ?? "signed in"}</span>
-            ) : null}
-          </div>
-          <div className="flex gap-2">
-            <Link
-              href="/memories"
-              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-            >
-              Memories
-            </Link>
-            <Link
-              href="/tasks"
-              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-            >
-              Tasks
-            </Link>
-            <Link
-              href="/onboarding"
-              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-            >
-              Import knowledge
-            </Link>
-            <button
-              type="button"
-              onClick={handleNewSession}
-              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-            >
-              New session
-            </button>
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-            >
-              Log out
+              &#8250;
             </button>
           </div>
-        </header>
+        ) : null}
 
         <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 py-6">
-          <div className="flex flex-1 flex-col gap-4">
-            {messages.length === 0 ? (
-              <p className="text-sm text-slate-500">
-                Ask something, or tell me something worth remembering.
-              </p>
-            ) : null}
+          {messages.length === 0 ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-6">
+              <h1 className="text-3xl font-semibold text-neutral-100">
+                {me ? `Hello, ${me?.username ?? ""}` : "Hello"}
+              </h1>
 
-            {messages.map((message) =>
-              message.role === "user" ? (
-                <div key={message.id} className="flex justify-end">
-                  <div className="max-w-[85%] whitespace-pre-wrap rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-100">
-                    {message.content}
-                  </div>
-                </div>
-              ) : (
-                <div key={message.id} className="flex justify-start">
-                  <div className="w-full max-w-[92%] rounded-xl border border-slate-800 bg-slate-900 px-4 py-3">
-                    <p className="whitespace-pre-wrap text-sm leading-relaxed text-slate-100">
-                      {message.content}
-                    </p>
-                    <MessageExtras
-                      memoryUsed={message.memoryUsed}
-                      trace={message.trace}
-                      followup={message.followup}
-                      recordState={message.recordState}
-                      taskState={message.taskState}
-                      busy={busyItem}
-                      onRecord={(recordId, action) =>
-                        message.turnId ? handleRecord(message.turnId, recordId, action) : undefined
-                      }
-                      onTask={(index, action) =>
-                        message.turnId ? handleTask(message.turnId, index, action) : undefined
-                      }
-                    />
-                    {message.saveStatus === "failed" ? (
-                      <p className="mt-2 text-xs text-rose-400">Not saved</p>
-                    ) : null}
-                  </div>
-                </div>
-              ),
-            )}
-            <div ref={endRef} />
-          </div>
+              {error ? (
+                <p role="alert" className="text-xs text-rose-400">
+                  {error}
+                </p>
+              ) : null}
 
-          {error ? (
-            <p role="alert" className="text-xs text-rose-400">
-              {error}
-            </p>
-          ) : null}
+              <div className="w-full max-w-2xl">
+                <form
+                  onSubmit={handleSend}
+                  className="flex w-full items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-2 focus-within:border-neutral-600"
+                >
+                  <input
+                    type="text"
+                    value={input}
+                    onChange={(event) => setInput(event.target.value)}
+                    placeholder="Ask anything"
+                    aria-label="Message"
+                    className="flex-1 bg-transparent text-sm text-neutral-100 placeholder:text-neutral-500 outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={disabled || input.trim().length === 0}
+                    aria-label="Send"
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
+                      disabled || input.trim().length === 0
+                        ? "bg-neutral-800 text-neutral-500"
+                        : "bg-teal-500 text-black"
+                    }`}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      className="h-4 w-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M22 2 11 13" />
+                      <path d="M22 2 15 22l-4-9-9-4Z" />
+                    </svg>
+                  </button>
+                </form>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex flex-1 flex-col gap-4">
+                {messages.map((message) =>
+                  message.role === "user" ? (
+                    <div key={message.id} className="flex justify-end">
+                      <div className="max-w-[85%] whitespace-pre-wrap rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-100">
+                        {message.content}
+                      </div>
+                    </div>
+                  ) : (
+                    <div key={message.id} className="flex justify-start">
+                      <div className="w-full max-w-[92%] rounded-xl border border-neutral-800 bg-neutral-950 px-4 py-3">
+                        <p className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
+                          {message.content}
+                        </p>
+                        <MessageExtras
+                          memoryUsed={message.memoryUsed}
+                          trace={message.trace}
+                          followup={message.followup}
+                          recordState={message.recordState}
+                          taskState={message.taskState}
+                          busy={busyItem}
+                          onRecord={(recordId, action) =>
+                            message.turnId
+                              ? handleRecord(message.turnId, recordId, action)
+                              : undefined
+                          }
+                          onTask={(index, action) =>
+                            message.turnId ? handleTask(message.turnId, index, action) : undefined
+                          }
+                        />
+                        {message.saveStatus === "failed" ? (
+                          <p className="mt-2 text-xs text-rose-400">Not saved</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ),
+                )}
+                <div ref={endRef} />
+              </div>
 
-          <form onSubmit={handleSend} className="flex items-center gap-2">
-            <input
-              type="text"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder="Type a message…"
-              aria-label="Message"
-              className="flex-1 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-emerald-700"
-            />
-            <button
-              type="submit"
-              disabled={disabled || input.trim().length === 0}
-              className="rounded-md border border-emerald-700 bg-emerald-900/60 px-4 py-2 text-sm font-semibold text-emerald-100 hover:bg-emerald-900 disabled:opacity-50"
-            >
-              {sending ? "Sending…" : "Send"}
-            </button>
-          </form>
+              {error ? (
+                <p role="alert" className="text-xs text-rose-400">
+                  {error}
+                </p>
+              ) : null}
+
+              <form
+                onSubmit={handleSend}
+                className="flex w-full items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-2 focus-within:border-neutral-600"
+              >
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  placeholder="Ask anything"
+                  aria-label="Message"
+                  className="flex-1 bg-transparent text-sm text-neutral-100 placeholder:text-neutral-500 outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={disabled || input.trim().length === 0}
+                  aria-label="Send"
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
+                    disabled || input.trim().length === 0
+                      ? "bg-neutral-800 text-neutral-500"
+                      : "bg-teal-500 text-black"
+                  }`}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M22 2 11 13" />
+                    <path d="M22 2 15 22l-4-9-9-4Z" />
+                  </svg>
+                </button>
+              </form>
+            </>
+          )}
         </main>
       </div>
     </div>

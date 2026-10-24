@@ -1,9 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
+import { AppShell } from "@/components/app-shell";
 import {
   AuthError,
   getMe,
@@ -158,7 +158,7 @@ export default function TasksPage() {
 
   if (!ready) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-950 p-6 text-sm text-slate-500">
+      <div className="flex min-h-screen items-center justify-center bg-black p-6 text-sm text-neutral-500">
         Loading…
       </div>
     );
@@ -171,44 +171,15 @@ export default function TasksPage() {
   const busy = busyId !== null;
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-950 text-slate-100">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
-          <span className="text-sm font-semibold tracking-tight text-white">
-            Personal Memory Assistant
-          </span>
-        </div>
-        <div className="flex gap-2">
-          <Link
-            href="/"
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-          >
-            Chat
-          </Link>
-          <Link
-            href="/memories"
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
-          >
-            Memories
-          </Link>
-          <span
-            aria-current="page"
-            className="rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100"
-          >
-            Tasks
-          </span>
-        </div>
-      </header>
-
-      <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-4 py-6">
+    <AppShell activeHref="/tasks">
+      <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-4 px-6 py-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-xl font-bold tracking-tight text-white">My tasks</h1>
+          <h1 className="text-xl font-bold tracking-tight text-neutral-100">My tasks</h1>
           <button
             type="button"
             onClick={() => void load(tab)}
             disabled={loading}
-            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600 disabled:opacity-50"
+            className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
           >
             Refresh
           </button>
@@ -221,8 +192,8 @@ export default function TasksPage() {
             aria-pressed={tab === "open"}
             className={
               tab === "open"
-                ? "rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100"
-                : "rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
+                ? "rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs font-semibold text-neutral-100"
+                : "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
             }
           >
             Not completed
@@ -233,15 +204,15 @@ export default function TasksPage() {
             aria-pressed={tab === "done"}
             className={
               tab === "done"
-                ? "rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100"
-                : "rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
+                ? "rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-1.5 text-xs font-semibold text-neutral-100"
+                : "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
             }
           >
             Completed
           </button>
         </div>
 
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-neutral-500">
           Reminders are sent for tasks that have a due time.
         </p>
 
@@ -251,7 +222,7 @@ export default function TasksPage() {
           </p>
         ) : null}
 
-        {loading ? <p className="text-sm text-slate-500">Loading…</p> : null}
+        {loading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
 
         {!loading && loadError ? (
           <div className="flex flex-col items-start gap-3 rounded-lg border border-rose-800/60 bg-rose-950/30 p-4">
@@ -261,7 +232,7 @@ export default function TasksPage() {
             <button
               type="button"
               onClick={() => void load(tab)}
-              className="rounded-md border border-rose-700 bg-rose-900/50 px-3 py-1.5 text-xs font-medium text-rose-100"
+              className="rounded-lg border border-rose-700 bg-rose-900/50 px-3 py-1.5 text-xs font-medium text-rose-100 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-rose-900/70 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
             >
               Try again
             </button>
@@ -269,7 +240,7 @@ export default function TasksPage() {
         ) : null}
 
         {!loading && !loadError && tasks !== null && sorted.length === 0 ? (
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-neutral-500">
             {tab === "open" ? "No open tasks" : "No completed tasks"}
           </p>
         ) : null}
@@ -282,12 +253,12 @@ export default function TasksPage() {
               const overdue = isOpen && dueAt !== null && dueAt < now;
               const isBusy = busyId === item.id;
               return (
-                <li key={item.id} className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+                <li key={item.id} className="rounded-xl border border-neutral-800 bg-neutral-950 p-4">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-xs font-medium text-slate-300">
+                    <span className="rounded border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-xs font-medium text-neutral-300">
                       Task
                     </span>
-                    <span className="rounded border border-slate-700 bg-slate-950 px-2 py-0.5 text-xs font-medium text-slate-300">
+                    <span className="rounded border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-xs font-medium text-neutral-300">
                       {originLabel(item.origin)}
                     </span>
                     {overdue ? (
@@ -297,9 +268,9 @@ export default function TasksPage() {
                     ) : null}
                   </div>
 
-                  <p className="mt-2 whitespace-pre-wrap text-sm text-slate-100">{item.title}</p>
+                  <p className="mt-2 whitespace-pre-wrap text-sm text-neutral-100">{item.title}</p>
 
-                  <p className="mt-1 text-xs text-slate-400">
+                  <p className="mt-1 text-xs text-neutral-400">
                     {item.due_at
                       ? `Due: ${formatDateTime(item.due_at, timezone)}`
                       : "No due date"}
@@ -311,7 +282,7 @@ export default function TasksPage() {
                         type="button"
                         onClick={() => void handleMarkDone(item.id)}
                         disabled={busy}
-                        className="rounded-md border border-emerald-700 bg-emerald-900/60 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-900 disabled:opacity-50"
+                        className="rounded-lg border border-teal-700 bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-teal-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50"
                       >
                         {isBusy ? "Marking…" : "Mark done"}
                       </button>
@@ -322,7 +293,7 @@ export default function TasksPage() {
             })}
           </ul>
         ) : null}
-      </main>
-    </div>
+      </div>
+    </AppShell>
   );
 }

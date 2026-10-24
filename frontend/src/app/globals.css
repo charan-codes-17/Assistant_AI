@@ -3,6 +3,12 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+
+  /* Motion tokens: one place to keep every interactive surface settling at the same speed. */
+  --dur-hover: 140ms; /* pointer hover in/out */
+  --dur-press: 100ms; /* press feedback is shorter so a tap reads as immediate */
+  --dur-settle: 200ms; /* content entering or leaving */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1); /* decelerating ease; never linear */
 }
 
 @theme inline {
@@ -22,4 +28,34 @@
 body {
   background: var(--background);
   color: var(--foreground);
+}
+
+/* Reduced motion: collapse every duration to an imperceptible value and drop transforms, so
+   press-scale and fade-rise resolve to an instant final state instead of animating. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* Subtle entrance for freshly rendered panes; the 6px lift keeps it from feeling like a bounce. */
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-rise {
+  /* fill-mode "both" holds the end frame so nothing snaps back after the animation finishes. */
+  animation: fade-rise var(--dur-settle) var(--ease-out) both;
 }
