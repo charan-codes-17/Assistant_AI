@@ -59,3 +59,29 @@ body {
   /* fill-mode "both" holds the end frame so nothing snaps back after the animation finishes. */
   animation: fade-rise var(--dur-settle) var(--ease-out) both;
 }
+
+/* Thinking indicator: three dots that rise slightly in sequence. Only opacity and transform move. */
+@keyframes thinking-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.animate-thinking-dot {
+  animation: thinking-dot 1.2s var(--ease-out) infinite;
+}
+
+/* Reduced motion: keep the dots visible but static instead of pulsing. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-thinking-dot {
+    animation: none;
+    opacity: 0.6;
+  }
+}

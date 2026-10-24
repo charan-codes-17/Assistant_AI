@@ -28,6 +28,13 @@ const KIND_LABELS: Record<string, string> = {
   glossary: "Glossary",
 };
 
+const KIND_CHIP_ORDER = [...KIND_ORDER, "other"] as const;
+
+/** Map any unknown kind to the shared "other" bucket for grouping and filtering. */
+function normalizeKind(kind: string): string {
+  return (KIND_ORDER as readonly string[]).includes(kind) ? kind : "other";
+}
+
 type StatusView = "confirmed" | "pending";
 
 type Group = { key: string; label: string; items: TimelineItem[] };
@@ -111,6 +118,9 @@ export default function MemoriesPage() {
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
+  const [kindFilter, setKindFilter] = useState<string>("all");
+  const [search, setSearch] = useState("");
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -161,6 +171,17 @@ export default function MemoriesPage() {
       void load(view);
     }
   }, [ready, view, load]);
+
+  // If the selected kind disappears from the current tab, fall back to "All".
+  useEffect(() => {
+    if (kindFilter === "all") {
+      return;
+    }
+    const present = items?.some((item) => normalizeKind(item.kind) === kindFilter) ?? false;
+    if (!present) {
+      setKindFilter("all");
+    }
+  }, [items, kindFilter]);
 
   async function handleSaveRecord(recordId: number) {
     setBusyId(recordId);
@@ -235,7 +256,45 @@ export default function MemoriesPage() {
     );
   }
 
-  const groups = items ? groupByKind(items) : [];
+  const tabItems = items ?? [];
+  const kindCounts = new Map<string, number>();
+  for (const item of tabItems) {
+    const key = normalizeKind(item.kind);
+    kindCounts.set(key, (kindCounts.get(key) ?? 0) + 1);
+  }
+  const kindChips = KIND_CHIP_ORDER.filter((key) => (kindCounts.get(key) ?? 0) > 0).map((key) => ({
+    key,
+    label: key === "other" ? "Other" : KIND_LABELS[key],
+    count: kindCounts.get(key) ?? 0,
+  }));
+  const activeKind =
+    kindFilter !== "all" && !kindCounts.has(kindFilter) ? "all" : kindFilter;
+  const query = search.trim().toLowerCase();
+  const kindScoped =
+    activeKind === "all"
+      ? tabItems
+      : tabItems.filter((item) => normalizeKind(item.kind) === activeKind);
+  const visible = query
+    ? kindScoped.filter((item) => item.content.toLowerCase().includes(query))
+    : kindScoped;
+  const groups: Group[] =
+    activeKind === "all"
+      ? groupByKind(visible)
+      : visible.length > 0
+        ? [
+            {
+              key: activeKind,
+              label: "",
+              items: visible
+                .slice()
+                .sort(
+                  (a, b) =>
+                    parseTimestamp(b.created_at).getTime() -
+                    parseTimestamp(a.created_at).getTime(),
+                ),
+            },
+          ]
+        : [];
 
   return (
     <AppShell activeHref="/memories">
@@ -285,6 +344,58 @@ export default function MemoriesPage() {
             : "Pending: saved as candidates. Each one is used only after you press Save."}
         </p>
 
+        <div className="flex flex-col gap-2">
+          <div className="relative">
+            <input
+              type="text"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search memories"
+              aria-label="Search memories"
+              className="w-full rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 pr-8 text-xs text-neutral-100 placeholder:text-neutral-500 outline-none focus:border-neutral-600 focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+            />
+            {search ? (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-sm leading-none text-neutral-500 transition-[color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:text-neutral-200 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500"
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setKindFilter("all")}
+              aria-pressed={activeKind === "all"}
+              className={
+                activeKind === "all"
+                  ? "rounded-lg border border-teal-700 bg-teal-900/40 px-3 py-1.5 text-xs font-semibold text-teal-100 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-teal-900/60 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+                  : "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+              }
+            >
+              All {tabItems.length}
+            </button>
+            {kindChips.map((chip) => (
+              <button
+                key={chip.key}
+                type="button"
+                onClick={() => setKindFilter(chip.key)}
+                aria-pressed={activeKind === chip.key}
+                className={
+                  activeKind === chip.key
+                    ? "rounded-lg border border-teal-700 bg-teal-900/40 px-3 py-1.5 text-xs font-semibold text-teal-100 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-teal-900/60 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+                    : "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-400 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+                }
+              >
+                {chip.label} {chip.count}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {actionError ? (
           <p role="alert" className="rounded-lg border border-rose-800/60 bg-rose-950/30 p-3 text-xs text-rose-300">
             {actionError}
@@ -312,13 +423,31 @@ export default function MemoriesPage() {
           <p className="text-sm text-neutral-500">No memories here yet</p>
         ) : null}
 
+        {!loading && !loadError && tabItems.length > 0 && visible.length === 0 ? (
+          <div className="flex flex-col items-start gap-3 rounded-lg border border-neutral-800 bg-neutral-950 p-4">
+            <p className="text-sm text-neutral-400">No memories match</p>
+            <button
+              type="button"
+              onClick={() => {
+                setKindFilter("all");
+                setSearch("");
+              }}
+              className="rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+            >
+              Clear filters
+            </button>
+          </div>
+        ) : null}
+
         {!loading && !loadError && groups.length > 0 ? (
           <div className="flex flex-col gap-6">
             {groups.map((group) => (
               <section key={group.key} className="flex flex-col gap-3">
-                <h2 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
-                  {group.label}
-                </h2>
+                {group.label ? (
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">
+                    {group.label}
+                  </h2>
+                ) : null}
                 <ul className="flex flex-col gap-3">
                   {group.items.map((item) => {
                     const isPending = item.status !== "confirmed";
