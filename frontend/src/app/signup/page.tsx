@@ -50,7 +50,7 @@ export default function SignupPage() {
     setSubmitting(true);
     try {
       await signup(username, password, inviteCode);
-      router.replace("/");
+      router.replace("/onboarding");
     } catch (err) {
       // A wrong, empty or unset invite code is the same 403, and the user cap is also a 403:
       // one message for all of them, so nothing reveals which one it was.

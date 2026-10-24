@@ -155,6 +155,52 @@ export type TaskActionResponse = {
   task_id: number | null;
 };
 
+export type OnboardingQuestion = {
+  id: string;
+  text: string;
+};
+
+export type OnboardingPrompt = {
+  import_prompt: string;
+  questions: OnboardingQuestion[];
+};
+
+/** A staged onboarding candidate. Mirrors services/onboarding.py CandidateOut. */
+export type OnboardingCandidate = {
+  record_id: number;
+  content: string;
+  kind: string;
+  certainty: string;
+};
+
+export type OnboardingDropped = {
+  count: number;
+  invalid: number;
+  secret: number;
+  over_cap: number;
+};
+
+/** Mirrors services/onboarding.py OnboardingResult. */
+export type OnboardingResult = {
+  groups: Record<string, OnboardingCandidate[]>;
+  pending_record_ids: number[];
+  duplicates_skipped: number;
+  dropped: OnboardingDropped;
+  suggested_timezone: string | null;
+  errors: string[];
+  timings: Record<string, number>;
+};
+
+export type BatchConfirmResponse = {
+  confirmed: number[];
+  ignored: number[];
+};
+
+export type BatchRejectResponse = {
+  rejected: number[];
+  ignored: number[];
+};
+
 // ---------------------------------------------------------------------------
 // Transport
 // ---------------------------------------------------------------------------
@@ -246,4 +292,34 @@ export function discardTask(turnId: string, index: number): Promise<TaskActionRe
     `/chat/${encodeURIComponent(turnId)}/tasks/${index}/discard`,
     { method: "POST" },
   );
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding + batch memory transitions
+// ---------------------------------------------------------------------------
+
+export function getOnboardingPrompt(): Promise<OnboardingPrompt> {
+  return request<OnboardingPrompt>("/onboarding/prompt");
+}
+
+/** Import pasted text. The backend rejects payloads over ONBOARDING_MAX_CHARS with a 413. */
+export function importOnboarding(text: string): Promise<OnboardingResult> {
+  return request<OnboardingResult>("/onboarding/import", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
+export function confirmBatch(recordIds: number[]): Promise<BatchConfirmResponse> {
+  return request<BatchConfirmResponse>("/memory/confirm-batch", {
+    method: "POST",
+    body: JSON.stringify({ record_ids: recordIds }),
+  });
+}
+
+export function rejectBatch(recordIds: number[]): Promise<BatchRejectResponse> {
+  return request<BatchRejectResponse>("/memory/reject-batch", {
+    method: "POST",
+    body: JSON.stringify({ record_ids: recordIds }),
+  });
 }

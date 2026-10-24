@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { MessageExtras, type RecordState, type TaskState } from "@/components/message-extras";
@@ -341,6 +342,12 @@ export default function ChatPage() {
           {me ? <span className="text-xs text-slate-500">{me.username ?? "signed in"}</span> : null}
         </div>
         <div className="flex gap-2">
+          <Link
+            href="/onboarding"
+            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-300 hover:border-slate-600"
+          >
+            Import knowledge
+          </Link>
           <button
             type="button"
             onClick={handleNewSession}
