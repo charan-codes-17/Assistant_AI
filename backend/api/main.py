@@ -28,6 +28,7 @@ from sqlalchemy import text
 from backend.api.followups import store
 from backend.api.routes_auth import router as auth_router
 from backend.api.routes_chat import router as chat_router
+from backend.api.routes_conversations import router as conversations_router
 from backend.api.routes_me import router as me_router
 from backend.api.routes_memory import router as memory_router
 from backend.api.routes_onboarding import router as onboarding_router
@@ -241,3 +242,4 @@ app.include_router(memory_router)
 app.include_router(profile_router)
 app.include_router(onboarding_router)
 app.include_router(tasks_router)
+app.include_router(conversations_router)

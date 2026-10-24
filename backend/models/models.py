@@ -49,6 +49,7 @@ class User(Base):
     goals: Mapped[List["Goal"]] = relationship(back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
     projects: Mapped[List["Project"]] = relationship(back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
     tasks: Mapped[List["Task"]] = relationship(back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
+    conversations: Mapped[List["Conversation"]] = relationship(back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
     profile_summary: Mapped[Optional["ProfileSummary"]] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan", passive_deletes=True)
 
 
@@ -200,4 +201,40 @@ class InspectorEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     session: Mapped["ConversationSession"] = relationship(back_populates="inspector_events")
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # No single-column index: the composite index below leads with user_id and covers it.
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="conversations")
+    messages: Mapped[List["ChatMessage"]] = relationship(back_populates="conversation", cascade="all, delete-orphan", passive_deletes=True)
+
+    __table_args__ = (
+        Index("ix_conversations_user_id_updated_at", "user_id", sa.text("updated_at DESC")),
+    )
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # No single-column index: the composite index below leads with conversation_id.
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # "user" | "assistant"
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+    __table_args__ = (
+        sa.CheckConstraint("role IN ('user', 'assistant')", name="ck_chat_messages_role"),
+        Index("ix_chat_messages_conversation_id_created_at", "conversation_id", "created_at"),
+    )
 

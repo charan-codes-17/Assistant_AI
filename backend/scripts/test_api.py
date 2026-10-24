@@ -49,7 +49,7 @@ from backend.api.followups import (
 from backend.api.main import app
 from backend.config.settings import settings
 from backend.database import AsyncSessionLocal, engine
-from backend.models.models import KnowledgeRecord, Task, User
+from backend.models.models import ChatMessage, Conversation, KnowledgeRecord, Task, User
 from backend.services import onboarding as onboarding_module
 from backend.services import orchestrator as orchestrator_module
 from backend.services.embeddings import embed_texts
@@ -1269,12 +1269,236 @@ async def a22_task_done_isolation(ctx: Ctx) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# B1-B4  Conversations API (server-side chat history)
+# ---------------------------------------------------------------------------
+
+async def count_messages(conversation_id: int) -> int:
+    async with AsyncSessionLocal() as session:
+        return int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(ChatMessage)
+                    .where(ChatMessage.conversation_id == conversation_id)
+                )
+            ).scalar_one()
+        )
+
+
+async def b1_conversation_roundtrip(ctx: Ctx) -> Dict[str, Any]:
+    uid = await new_user("b1")
+    try:
+        # Surrounding whitespace is trimmed and the result truncated to 60 characters.
+        title_source = "   " + ("Revise data structures " * 5) + "   "
+        expected_title = title_source.strip()[:60]
+        r_create = await ctx.client.post(
+            "/conversations",
+            headers=hdr(uid),
+            json={"first_message": title_source},
+        )
+        create_body = r_create.json()
+        cid = create_body.get("id")
+        title_ok = create_body.get("title") == expected_title and len(expected_title) == 60
+        fields_ok = set(create_body.keys()) == {"id", "title", "updated_at"}
+
+        r_append1 = await ctx.client.post(
+            f"/conversations/{cid}/messages",
+            headers=hdr(uid),
+            json={"user": "How do I start?", "assistant": "Start with arrays."},
+        )
+        await asyncio.sleep(0.01)
+        r_append2 = await ctx.client.post(
+            f"/conversations/{cid}/messages",
+            headers=hdr(uid),
+            json={"user": "And then?", "assistant": "Then linked lists."},
+        )
+
+        r_list = await ctx.client.get("/conversations", headers=hdr(uid))
+        listed = r_list.json()
+        list_ok = (
+            r_list.status_code == 200
+            and cid in [item["id"] for item in listed]
+            and all(set(item.keys()) == {"id", "title", "updated_at"} for item in listed)
+        )
+
+        r_detail = await ctx.client.get(f"/conversations/{cid}", headers=hdr(uid))
+        detail = r_detail.json()
+        roles = [m["role"] for m in detail.get("messages", [])]
+        contents = [m["content"] for m in detail.get("messages", [])]
+        order_ok = roles == ["user", "assistant", "user", "assistant"] and contents == [
+            "How do I start?",
+            "Start with arrays.",
+            "And then?",
+            "Then linked lists.",
+        ]
+
+        ok = (
+            r_create.status_code == 200
+            and isinstance(cid, int)
+            and title_ok
+            and fields_ok
+            and r_append1.status_code == 200
+            and r_append2.status_code == 200
+            and list_ok
+            and r_detail.status_code == 200
+            and order_ok
+        )
+        return _result(
+            "B1",
+            "Conversation create/append/list/load",
+            "title=first 60 chars; pairs appended in created_at order",
+            f"create={r_create.status_code}, title_ok={title_ok}, fields_ok={fields_ok}, "
+            f"append={r_append1.status_code}/{r_append2.status_code}, list={list_ok}, order={order_ok}",
+            ok,
+            f"cid={cid}, roles={roles}",
+        )
+    finally:
+        await drop_user(uid)
+
+
+async def b2_conversation_isolation(ctx: Ctx) -> Dict[str, Any]:
+    a_uid = await new_user("b2a")
+    b_uid = await new_user("b2b")
+    try:
+        r_create = await ctx.client.post(
+            "/conversations", headers=hdr(a_uid), json={"first_message": "A private chat"}
+        )
+        cid = r_create.json()["id"]
+        await ctx.client.post(
+            f"/conversations/{cid}/messages",
+            headers=hdr(a_uid),
+            json={"user": "hi", "assistant": "hello"},
+        )
+
+        b_list = await ctx.client.get("/conversations", headers=hdr(b_uid))
+        empty_ok = b_list.status_code == 200 and b_list.json() == []
+
+        b_get = await ctx.client.get(f"/conversations/{cid}", headers=hdr(b_uid))
+        b_patch = await ctx.client.patch(
+            f"/conversations/{cid}", headers=hdr(b_uid), json={"title": "hacked"}
+        )
+        b_del = await ctx.client.delete(f"/conversations/{cid}?confirm=true", headers=hdr(b_uid))
+        b_append = await ctx.client.post(
+            f"/conversations/{cid}/messages",
+            headers=hdr(b_uid),
+            json={"user": "x", "assistant": "y"},
+        )
+        missing = await ctx.client.get("/conversations/999999999", headers=hdr(a_uid))
+
+        responses = [b_get, b_patch, b_del, b_append]
+        all_404 = all(r.status_code == 404 for r in responses)
+        bodies = [r.json() for r in responses]
+        identical = all(body == bodies[0] for body in bodies)
+        same_as_missing = bodies[0] == missing.json()
+        not_found_shape = bodies[0] == {"detail": "not found"}
+
+        a_detail = await ctx.client.get(f"/conversations/{cid}", headers=hdr(a_uid))
+        intact = (
+            a_detail.status_code == 200
+            and a_detail.json().get("title") == "A private chat"
+            and len(a_detail.json().get("messages", [])) == 2
+        )
+
+        ok = empty_ok and all_404 and identical and same_as_missing and not_found_shape and intact
+        return _result(
+            "B2",
+            "Conversation ownership isolation",
+            "B list empty; B gets identical 404 (same as missing) on A's conversation; A intact",
+            f"empty={empty_ok}, codes={[r.status_code for r in responses]}, "
+            f"identical={identical}, same_as_missing={same_as_missing}",
+            ok,
+            f"intact={intact}, body={bodies[0]}",
+        )
+    finally:
+        await drop_user(a_uid)
+        await drop_user(b_uid)
+
+
+async def b3_conversation_delete_gate(ctx: Ctx) -> Dict[str, Any]:
+    uid = await new_user("b3")
+    try:
+        r_create = await ctx.client.post(
+            "/conversations", headers=hdr(uid), json={"first_message": "Delete gate chat"}
+        )
+        cid = r_create.json()["id"]
+        await ctx.client.post(
+            f"/conversations/{cid}/messages",
+            headers=hdr(uid),
+            json={"user": "one", "assistant": "two"},
+        )
+
+        r_no = await ctx.client.delete(f"/conversations/{cid}", headers=hdr(uid))
+        still_there = await ctx.client.get(f"/conversations/{cid}", headers=hdr(uid))
+        kept_messages = len(still_there.json().get("messages", [])) if still_there.status_code == 200 else -1
+
+        r_yes = await ctx.client.delete(f"/conversations/{cid}?confirm=true", headers=hdr(uid))
+        gone = await ctx.client.get(f"/conversations/{cid}", headers=hdr(uid))
+
+        ok = (
+            r_no.status_code == 400
+            and still_there.status_code == 200
+            and kept_messages == 2
+            and r_yes.status_code == 200
+            and gone.status_code == 404
+        )
+        return _result(
+            "B3",
+            "Conversation delete gate (confirm=true)",
+            "no confirm -> 400 chat+history intact; confirm=true -> 200 then 404",
+            f"no_confirm={r_no.status_code}, after_400={still_there.status_code}(msgs={kept_messages}), "
+            f"with_confirm={r_yes.status_code}, after_delete={gone.status_code}",
+            ok,
+            f"cid={cid}",
+        )
+    finally:
+        await drop_user(uid)
+
+
+async def b4_user_delete_cascades(ctx: Ctx) -> Dict[str, Any]:
+    uid = await new_user("b4")
+    try:
+        r_create = await ctx.client.post(
+            "/conversations", headers=hdr(uid), json={"first_message": "Cascade chat"}
+        )
+        cid = r_create.json()["id"]
+        await ctx.client.post(
+            f"/conversations/{cid}/messages",
+            headers=hdr(uid),
+            json={"user": "a", "assistant": "b"},
+        )
+
+        async with AsyncSessionLocal() as session:
+            conv_before = await session.get(Conversation, cid)
+        msgs_before = await count_messages(cid)
+        before_ok = conv_before is not None and msgs_before == 2
+
+        # Deleting the user must remove the conversations and messages via ON DELETE CASCADE.
+        await drop_user(uid)
+
+        async with AsyncSessionLocal() as session:
+            conv_after = await session.get(Conversation, cid)
+        msgs_after = await count_messages(cid)
+
+        ok = before_ok and conv_after is None and msgs_after == 0
+        return _result(
+            "B4",
+            "User deletion cascades to history",
+            "deleting the user removes its conversations and messages",
+            f"before={before_ok}, conv_after={conv_after is not None}, msgs_after={msgs_after}",
+            ok,
+            f"cid={cid}, msgs_before={msgs_before}",
+        )
+    finally:
+        await drop_user(uid)
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
 ORDER = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10",
          "A11", "A12", "A13", "A14", "A15", "A16", "A17", "A18", "A19",
-         "A20", "A21", "A22"]
+         "A20", "A21", "A22", "B1", "B2", "B3", "B4"]
 
 FUNCS = {
     "A1": a1_health,
@@ -1299,6 +1523,10 @@ FUNCS = {
     "A20": a20_tasks_list,
     "A21": a21_task_done,
     "A22": a22_task_done_isolation,
+    "B1": b1_conversation_roundtrip,
+    "B2": b2_conversation_isolation,
+    "B3": b3_conversation_delete_gate,
+    "B4": b4_user_delete_cascades,
 }
 
 

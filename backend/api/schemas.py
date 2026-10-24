@@ -33,6 +33,11 @@ TIMELINE_DEFAULT_LIMIT = 50
 TIMELINE_MAX_LIMIT = 200
 PROFILE_BLOB_MAX = 4000
 ONBOARDING_ANSWER_MAX = QUESTIONNAIRE_ANSWER_MAX_CHARS
+CONVERSATION_TITLE_MAX = 120
+CONVERSATION_FIRST_MESSAGE_MAX = 8000
+CONVERSATION_MESSAGE_MAX = 8000
+CONVERSATION_DEFAULT_LIMIT = 50
+CONVERSATION_MAX_LIMIT = 200
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +253,60 @@ class TaskOut(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Conversations (server-side chat history)
+# ---------------------------------------------------------------------------
+
+class ChatMessageOut(BaseModel):
+    """One stored turn. `content` is untrusted text, returned verbatim and never executed."""
+
+    id: int
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
+
+
+class ConversationOut(BaseModel):
+    """List item: id, title, updated_at only."""
+
+    id: int
+    title: str
+    updated_at: datetime
+
+
+class ConversationDetail(BaseModel):
+    id: int
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    messages: list[ChatMessageOut] = Field(default_factory=list)
+
+
+class ConversationCreateRequest(BaseModel):
+    """The first user message; the title is derived from it in code (no LLM call)."""
+
+    first_message: str = Field(min_length=1, max_length=CONVERSATION_FIRST_MESSAGE_MAX)
+
+
+class ConversationRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=CONVERSATION_TITLE_MAX)
+
+
+class MessagePairRequest(BaseModel):
+    user: str = Field(min_length=1, max_length=CONVERSATION_MESSAGE_MAX)
+    assistant: str = Field(min_length=1, max_length=CONVERSATION_MESSAGE_MAX)
+
+
+class MessagePairResponse(BaseModel):
+    conversation_id: int
+    messages: list[ChatMessageOut] = Field(default_factory=list)
+
+
+class ConversationActionResponse(BaseModel):
+    id: int
+    status: str
+
+
+# ---------------------------------------------------------------------------
 # Profile
 # ---------------------------------------------------------------------------
 
@@ -305,6 +364,11 @@ __all__ = [
     "TIMELINE_MAX_LIMIT",
     "PROFILE_BLOB_MAX",
     "STATEMENT_MAX_CHARS",
+    "CONVERSATION_TITLE_MAX",
+    "CONVERSATION_FIRST_MESSAGE_MAX",
+    "CONVERSATION_MESSAGE_MAX",
+    "CONVERSATION_DEFAULT_LIMIT",
+    "CONVERSATION_MAX_LIMIT",
     "HealthResponse",
     "SessionNewResponse",
     "MeResponse",
@@ -322,6 +386,15 @@ __all__ = [
     "BatchRejectResponse",
     "TimelineItem",
     "TimelineDay",
+    "TaskOut",
+    "ChatMessageOut",
+    "ConversationOut",
+    "ConversationDetail",
+    "ConversationCreateRequest",
+    "ConversationRenameRequest",
+    "MessagePairRequest",
+    "MessagePairResponse",
+    "ConversationActionResponse",
     "ProfileRequest",
     "ProfileResponse",
     "OnboardingImportRequest",
