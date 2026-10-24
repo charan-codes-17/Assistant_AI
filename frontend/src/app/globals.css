@@ -30,24 +30,24 @@ body {
   color: var(--foreground);
 }
 
-/* Reduced motion: collapse every duration to an imperceptible value and drop transforms, so
-   press-scale and fade-rise resolve to an instant final state instead of animating. */
+/* Reduced motion: drop movement only. Animations resolve to their final frame immediately and
+   every transform is removed, so press-scale and fade-rise land instantly, while colour and
+   opacity transitions keep their normal timing. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
-    transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transform: none !important;
   }
 }
 
-/* Subtle entrance for freshly rendered panes; the 6px lift keeps it from feeling like a bounce. */
+/* Subtle entrance for freshly rendered panes; the 10px lift keeps it from feeling like a bounce. */
 @keyframes fade-rise {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -56,8 +56,15 @@ body {
 }
 
 .animate-fade-rise {
-  /* fill-mode "both" holds the end frame so nothing snaps back after the animation finishes. */
-  animation: fade-rise var(--dur-settle) var(--ease-out) both;
+  /* 280ms reads clearly as an entrance without holding the eye; fill-mode "both" holds the end
+     frame so nothing snaps back after the animation finishes. */
+  animation: fade-rise 280ms var(--ease-out) both;
+}
+
+/* Slim dark scrollbar for the message scroller; keeps the rail unobtrusive on a dark surface. */
+.chat-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #404040 transparent;
 }
 
 /* Thinking indicator: three dots that rise slightly in sequence. Only opacity and transform move. */

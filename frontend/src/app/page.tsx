@@ -656,7 +656,7 @@ export default function ChatPage() {
   }, []);
 
   return (
-    <div className="flex min-h-screen bg-black text-neutral-200">
+    <div className="flex h-dvh overflow-hidden bg-black text-neutral-200">
       <ChatSidebar
         conversations={conversations}
         activeId={activeConversationId}
@@ -675,12 +675,12 @@ export default function ChatPage() {
         onCollapse={() => setCollapsed(true)}
       />
 
-      <div className="flex min-h-screen flex-1 flex-col bg-black">
-        <div className="border-b border-amber-800/60 bg-amber-950/40 px-4 py-2 text-center text-xs text-amber-300">
+      <div className="flex min-w-0 flex-1 flex-col bg-black">
+        <div className="shrink-0 border-b border-amber-800/60 bg-amber-950/40 px-4 py-2 text-center text-xs text-amber-300">
           {BANNER}
         </div>
 
-        <div className="flex items-center border-b border-neutral-800 px-3 py-2 md:hidden">
+        <div className="flex shrink-0 items-center border-b border-neutral-800 px-3 py-2 md:hidden">
           <button
             type="button"
             onClick={() => setSidebarOpen(true)}
@@ -692,7 +692,7 @@ export default function ChatPage() {
         </div>
 
         {collapsed ? (
-          <div className="hidden border-b border-neutral-800 px-3 py-2 md:block">
+          <div className="hidden shrink-0 border-b border-neutral-800 px-3 py-2 md:block">
             <button
               type="button"
               onClick={() => setCollapsed(false)}
@@ -705,113 +705,128 @@ export default function ChatPage() {
         ) : null}
 
         <main
-          className={`flex flex-1 flex-col gap-4 px-4 py-6 ${
-            messages.length === 0
-              ? "items-center justify-center"
-              : "mx-auto w-full max-w-3xl"
+          className={`flex min-h-0 flex-1 flex-col ${
+            messages.length === 0 ? "justify-center" : ""
           }`}
         >
-          {messages.length === 0 ? (
-            <div className="flex flex-col items-center gap-4">
-              <h1 className="text-3xl font-semibold text-neutral-100">
-                {me ? `Hello, ${me?.username ?? ""}` : "Hello"}
-              </h1>
-            </div>
-          ) : (
-            <div className="flex flex-1 flex-col gap-4">
-              {messages.map((message) =>
-                message.role === "user" ? (
-                  <div
-                    key={message.id}
-                    className={`flex justify-end ${message.live ? "animate-fade-rise" : ""}`}
-                  >
-                    <div className="max-w-[85%] whitespace-pre-wrap rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-100">
-                      {message.content}
-                    </div>
-                  </div>
-                ) : (
-                  <div
-                    key={message.id}
-                    className={`flex justify-start ${message.live ? "animate-fade-rise" : ""}`}
-                  >
-                    <div className="w-full max-w-[92%]">
-                      <p className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
+          <div
+            className={`chat-scroll ${
+              messages.length === 0 ? "flex-none" : "min-h-0 flex-1 overflow-y-auto"
+            }`}
+          >
+            {messages.length === 0 ? (
+              <div className="animate-fade-rise flex flex-col items-center gap-4 px-4 py-6">
+                <h1 className="text-3xl font-semibold text-neutral-100">
+                  {me ? `Hello, ${me?.username ?? ""}` : "Hello"}
+                </h1>
+              </div>
+            ) : (
+              <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 py-6">
+                {messages.map((message) =>
+                  message.role === "user" ? (
+                    <div
+                      key={message.id}
+                      className={`flex justify-end ${message.live ? "animate-fade-rise" : ""}`}
+                    >
+                      <div className="max-w-[85%] whitespace-pre-wrap rounded-xl border border-neutral-800 bg-neutral-900 px-4 py-2 text-sm text-neutral-100">
                         {message.content}
-                      </p>
-                      <MessageExtras
-                        actions={
-                          <button
-                            type="button"
-                            onClick={() => void handleCopy(message.id, message.content)}
-                            aria-label="Copy reply text"
-                            className="mt-1 inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-neutral-500 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-900 hover:text-neutral-300 active:scale-[0.97] active:duration-[var(--dur-press)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
-                          >
-                            <svg
-                              viewBox="0 0 24 24"
-                              className="h-3.5 w-3.5"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              aria-hidden="true"
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      key={message.id}
+                      className={`flex justify-start ${message.live ? "animate-fade-rise" : ""}`}
+                    >
+                      <div className="w-full max-w-[92%]">
+                        <p className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
+                          {message.content}
+                        </p>
+                        <MessageExtras
+                          actions={
+                            <button
+                              type="button"
+                              onClick={() => void handleCopy(message.id, message.content)}
+                              aria-label="Copy reply text"
+                              className="mt-1 inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-neutral-500 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-900 hover:text-neutral-300 active:scale-[0.97] active:duration-[var(--dur-press)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
                             >
-                              <rect x="9" y="9" width="11" height="11" rx="2" />
-                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                            </svg>
-                            {copyState[message.id] === "copied"
-                              ? "Copied"
-                              : copyState[message.id] === "failed"
-                                ? "Copy failed"
-                                : "Copy"}
-                          </button>
-                        }
-                        memoryUsed={message.memoryUsed}
-                        trace={message.trace}
-                        followup={message.followup}
-                        recordState={message.recordState}
-                        taskState={message.taskState}
-                        busy={busyItem}
-                        onRecord={(recordId, action) =>
-                          message.turnId
-                            ? handleRecord(message.turnId, recordId, action)
-                            : undefined
-                        }
-                        onTask={(index, action) =>
-                          message.turnId ? handleTask(message.turnId, index, action) : undefined
-                        }
-                      />
-                      {message.saveStatus === "failed" ? (
-                        <p className="mt-2 text-xs text-rose-400">Not saved</p>
-                      ) : null}
+                              <svg
+                                viewBox="0 0 24 24"
+                                className="h-3.5 w-3.5"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                <rect x="9" y="9" width="11" height="11" rx="2" />
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                              </svg>
+                              {copyState[message.id] === "copied"
+                                ? "Copied"
+                                : copyState[message.id] === "failed"
+                                  ? "Copy failed"
+                                  : "Copy"}
+                            </button>
+                          }
+                          memoryUsed={message.memoryUsed}
+                          trace={message.trace}
+                          followup={message.followup}
+                          recordState={message.recordState}
+                          taskState={message.taskState}
+                          busy={busyItem}
+                          onRecord={(recordId, action) =>
+                            message.turnId
+                              ? handleRecord(message.turnId, recordId, action)
+                              : undefined
+                          }
+                          onTask={(index, action) =>
+                            message.turnId ? handleTask(message.turnId, index, action) : undefined
+                          }
+                        />
+                        {message.saveStatus === "failed" ? (
+                          <p className="mt-2 text-xs text-rose-400">Not saved</p>
+                        ) : null}
+                      </div>
+                    </div>
+                  ),
+                )}
+                {sending ? (
+                  <div className="flex justify-start">
+                    <div
+                      role="status"
+                      aria-label="Assistant is thinking"
+                      className="flex items-center gap-1 py-1"
+                    >
+                      <span className="h-1.5 w-1.5 animate-thinking-dot rounded-full bg-neutral-500" />
+                      <span className="h-1.5 w-1.5 animate-thinking-dot rounded-full bg-neutral-500 [animation-delay:0.15s]" />
+                      <span className="h-1.5 w-1.5 animate-thinking-dot rounded-full bg-neutral-500 [animation-delay:0.3s]" />
                     </div>
                   </div>
-                ),
-              )}
-              {sending ? (
-                <div className="flex justify-start">
-                  <div
-                    role="status"
-                    aria-label="Assistant is thinking"
-                    className="flex items-center gap-1 py-1"
-                  >
-                    <span className="h-1.5 w-1.5 animate-thinking-dot rounded-full bg-neutral-500" />
-                    <span className="h-1.5 w-1.5 animate-thinking-dot rounded-full bg-neutral-500 [animation-delay:0.15s]" />
-                    <span className="h-1.5 w-1.5 animate-thinking-dot rounded-full bg-neutral-500 [animation-delay:0.3s]" />
-                  </div>
-                </div>
-              ) : null}
-              <div ref={endRef} />
-            </div>
-          )}
+                ) : null}
+                <div ref={endRef} />
+              </div>
+            )}
+          </div>
 
-          {error ? (
-            <p role="alert" className="text-xs text-rose-400">
-              {error}
-            </p>
-          ) : null}
+          <div
+            className={`relative mx-auto w-full shrink-0 px-4 pb-4 pt-2 ${
+              messages.length === 0 ? "max-w-2xl" : "max-w-3xl"
+            }`}
+          >
+            {messages.length > 0 ? (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-x-0 -top-8 h-8 bg-gradient-to-t from-black via-black to-transparent"
+              />
+            ) : null}
 
-          <div className={`w-full ${messages.length === 0 ? "max-w-2xl" : ""}`}>
+            {error ? (
+              <p role="alert" className="mb-2 text-xs text-rose-400">
+                {error}
+              </p>
+            ) : null}
+
             <form
               ref={formRef}
               onSubmit={handleSend}
