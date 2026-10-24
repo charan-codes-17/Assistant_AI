@@ -204,6 +204,7 @@ async def memory_timeline(
                 source_ref=record.source_ref,
                 status=record.status,
                 created_at=record.created_at,
+                rationale=record.rationale,
             )
         )
 

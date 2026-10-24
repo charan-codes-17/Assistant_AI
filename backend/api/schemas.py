@@ -229,6 +229,7 @@ class TimelineItem(BaseModel):
     source_ref: str | None = None
     status: str
     created_at: datetime
+    rationale: str | None = None
 
 
 class TimelineDay(BaseModel):

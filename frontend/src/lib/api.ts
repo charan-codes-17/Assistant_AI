@@ -149,6 +149,24 @@ export type RecordActionResponse = {
   status: string;
 };
 
+/** Mirrors backend/api/schemas.py TimelineItem. */
+export type TimelineItem = {
+  id: number;
+  content: string;
+  kind: string;
+  certainty: string;
+  source: string;
+  source_ref: string | null;
+  status: string;
+  created_at: string;
+  rationale: string | null;
+};
+
+export type TimelineDay = {
+  date: string;
+  items: TimelineItem[];
+};
+
 export type TaskActionResponse = {
   status: "confirmed" | "discarded";
   index: number;
@@ -278,6 +296,31 @@ export function confirmRecord(recordId: number): Promise<RecordActionResponse> {
 
 export function rejectRecord(recordId: number): Promise<RecordActionResponse> {
   return request<RecordActionResponse>(`/memory/${recordId}/reject`, { method: "POST" });
+}
+
+/**
+ * GET /memory/timeline. Default status is "all" (everything except rejected), but this
+ * app renders one status view at a time, so it always passes "confirmed" or "pending".
+ */
+export function getTimeline(
+  status: "confirmed" | "pending",
+  limit = 200,
+): Promise<TimelineDay[]> {
+  const params = new URLSearchParams({ status, limit: String(limit) });
+  return request<TimelineDay[]>(`/memory/timeline?${params.toString()}`);
+}
+
+export function editMemory(recordId: number, content: string): Promise<RecordActionResponse> {
+  return request<RecordActionResponse>(`/memory/${recordId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function deleteMemory(recordId: number): Promise<RecordActionResponse> {
+  return request<RecordActionResponse>(`/memory/${recordId}?confirm=true`, {
+    method: "DELETE",
+  });
 }
 
 export function confirmTask(turnId: string, index: number): Promise<TaskActionResponse> {
