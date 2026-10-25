@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 # Docs are a development-only convenience (the seam itself only works in development).
 _DOCS_ENABLED = settings.APP_ENV == "development"
 
+# The single "production" condition, shared with the Secure session cookie flag
+# (routes_auth._secure_cookie). HSTS is only meaningful when the app is served over HTTPS.
+_IS_PRODUCTION = settings.APP_ENV == "production"
+
 
 async def _shutdown_application(application: Any) -> None:
     """Stop and close an Application that may only be partially started. Never raises."""
@@ -191,7 +195,27 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/docs" if _DOCS_ENABLED else None,
     redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Attach baseline security headers to every response.
+
+    CORS is deliberately not touched: the web client reaches this API only through a
+    same-origin proxy, so no cross-origin access is supported. Status codes and response
+    bodies are never altered. Cache-Control is only added when the handler did not set one.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+    if _IS_PRODUCTION:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
 
 
 @app.exception_handler(Exception)
