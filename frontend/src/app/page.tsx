@@ -12,6 +12,8 @@ import { useRouter } from "next/navigation";
 
 import { MessageExtras, type RecordState, type TaskState } from "@/components/message-extras";
 import { ChatSidebar } from "@/components/chat-sidebar";
+import { ChatSkillsPicker, type SkillResultPayload } from "@/components/chat-skills-picker";
+import { ChatSkillComposer } from "@/components/chat-skill-composer";
 import {
   ApiError,
   AuthError,
@@ -37,6 +39,7 @@ import {
   type HistoryMessage,
   type Me,
   type MemoryUsedItem,
+  type SkillOut,
   type TraceInfo,
 } from "@/lib/api";
 
@@ -86,7 +89,17 @@ type Message = {
   saveStatus: "pending" | "saved" | "failed";
   // True only for messages appended live in this session, so restored history does not animate in.
   live: boolean;
+  // Set only on messages appended by a skill run; drives the "not saved" label.
+  skillName?: string | null;
 };
+
+// Skill-run messages carry this id prefix so they can be told apart from chat messages and left
+// out of the history sent to /chat. Their turnId stays a real turn_id so Save/Discard still works.
+const SKILL_ID_PREFIX = "skill:";
+
+function isSkillMessage(message: Message): boolean {
+  return message.id.startsWith(SKILL_ID_PREFIX);
+}
 
 export default function ChatPage() {
   const router = useRouter();
@@ -97,6 +110,8 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
   const [busyItem, setBusyItem] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [activeSkill, setActiveSkill] = useState<SkillOut | null>(null);
 
   // Sidebar / server-side history.
   const [conversations, setConversations] = useState<ConversationOut[]>([]);
@@ -288,6 +303,10 @@ export default function ChatPage() {
     }
 
     function onPaste(event: ClipboardEvent) {
+      // In skill mode the chat composer is hidden: never buffer a paste into its hidden draft.
+      if (activeSkill) {
+        return;
+      }
       if (isEditable(event.target)) {
         return;
       }
@@ -315,7 +334,7 @@ export default function ChatPage() {
       document.removeEventListener("paste", onPaste);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, []);
+  }, [activeSkill]);
 
   // Clear any pending copy-feedback timers on unmount.
   useEffect(() => {
@@ -401,10 +420,13 @@ export default function ChatPage() {
         return;
       }
 
-      const history: HistoryMessage[] = messages.slice(-HISTORY_MAX_ITEMS).map((message) => ({
-        role: message.role,
-        content: message.content.slice(0, HISTORY_CONTENT_MAX),
-      }));
+      const history: HistoryMessage[] = messages
+        .filter((message) => !isSkillMessage(message))
+        .slice(-HISTORY_MAX_ITEMS)
+        .map((message) => ({
+          role: message.role,
+          content: message.content.slice(0, HISTORY_CONTENT_MAX),
+        }));
       const generation = generationRef.current;
 
       idRef.current += 1;
@@ -464,6 +486,28 @@ export default function ChatPage() {
     },
     [input, sending, sessionId, messages, router, startPolling, saveExchange],
   );
+
+  // Append one assistant message for a finished skill run. It is never saved to the server and is
+  // filtered out of the history sent to /chat, but its real turn_id keeps Save/Discard working.
+  const handleSkillResult = useCallback((payload: SkillResultPayload) => {
+    const message: Message = {
+      id: `${SKILL_ID_PREFIX}${payload.response.turn_id}`,
+      role: "assistant",
+      content: payload.response.reply,
+      turnId: payload.response.turn_id,
+      memoryUsed: payload.response.memory_used,
+      trace: payload.response.trace,
+      followup: payload.followup,
+      recordState: {},
+      taskState: {},
+      saveStatus: "saved",
+      live: false,
+      skillName: payload.skillName,
+    };
+    setMessages((prev) => [...prev, message]);
+  }, []);
+
+  const closeSkills = useCallback(() => setSkillsOpen(false), []);
 
   const handleNewSession = useCallback(async () => {
     stopPolling();
@@ -753,6 +797,11 @@ export default function ChatPage() {
                       className={`flex justify-start ${message.live ? "animate-fade-rise" : ""}`}
                     >
                       <div className="w-full max-w-[92%]">
+                        {isSkillMessage(message) ? (
+                          <p className="mb-1 text-xs text-neutral-500">
+                            Skill: {message.skillName ?? "unknown"} - not saved to chat history
+                          </p>
+                        ) : null}
                         <div className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
                           {message.content.split(/\r?\n/).map((line, index) => (
                             <span
@@ -858,6 +907,17 @@ export default function ChatPage() {
               </p>
             ) : null}
 
+            {skillsOpen ? (
+              <ChatSkillsPicker
+                onSelect={(skill) => {
+                  setActiveSkill(skill);
+                  setSkillsOpen(false);
+                }}
+                onClose={closeSkills}
+              />
+            ) : null}
+
+            <div className={activeSkill ? "hidden" : undefined}>
             <form
               ref={formRef}
               onSubmit={handleSend}
@@ -871,8 +931,36 @@ export default function ChatPage() {
                 rows={1}
                 placeholder="Ask anything"
                 aria-label="Message"
-                className="flex-1 resize-none bg-transparent py-1 text-sm leading-6 text-neutral-100 placeholder:text-neutral-500 outline-none"
+                className="chat-scroll flex-1 resize-none bg-transparent py-1 text-sm leading-6 text-neutral-100 placeholder:text-neutral-500 outline-none"
               />
+              <button
+                type="button"
+                data-skills-toggle
+                onClick={() => setSkillsOpen((value) => !value)}
+                onMouseDown={(event) => event.preventDefault()}
+                aria-label="Skills"
+                aria-expanded={skillsOpen}
+                title="Skills"
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-[background-color,border-color,color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] active:scale-[0.97] active:duration-[var(--dur-press)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black ${
+                  skillsOpen
+                    ? "border-teal-700 bg-neutral-900 text-teal-300"
+                    : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-800 hover:text-neutral-100"
+                }`}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  className="h-4 w-4"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 4l1.6 4.6L18 10.2l-4.4 1.6L12 16.4l-1.6-4.6L6 10.2l4.4-1.6z" />
+                  <path d="M18.5 15.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" />
+                </svg>
+              </button>
               <button
                 type="submit"
                 disabled={disabled || input.trim().length === 0}
@@ -913,6 +1001,15 @@ export default function ChatPage() {
                 )}
               </button>
             </form>
+            </div>
+
+            {activeSkill ? (
+              <ChatSkillComposer
+                skill={activeSkill}
+                onResult={handleSkillResult}
+                onExit={() => setActiveSkill(null)}
+              />
+            ) : null}
 
             <p className="mt-2 text-center text-xs text-neutral-500">{BANNER}</p>
           </div>
