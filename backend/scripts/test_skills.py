@@ -1179,6 +1179,92 @@ async def s15_dates_and_phrasings(ctx: Ctx) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# S16  No-invention / second-person contract lands in the right prompts only
+# ---------------------------------------------------------------------------
+
+# skill name -> (input or None, the substring its first system message must contain)
+S16_PROMPT_CASES = [
+    ("day-plan", None, "Each reason must come only from the data"),
+    (
+        "weekly-review",
+        None,
+        "Never add examples, analogies, hypothetical situations or invented context.",
+    ),
+    (
+        "open-loops",
+        None,
+        "Never add examples, analogies, hypothetical situations or invented context.",
+    ),
+    ("decision-recall", None, "Write each decision in the second person"),
+    (
+        "stress-test-idea",
+        "switch the whole project to SQLite",
+        "Write each stored decision in the second person",
+    ),
+]
+
+S16_RULE_LINES = ("Never invent facts", "second person")
+
+
+async def s16_prompt_contract(ctx: Ctx) -> Dict[str, Any]:
+    uid = await new_user("s16")
+    try:
+        now = datetime.now(IST)
+        await seed_standard(uid, now)
+        checks: List[tuple[str, bool]] = []
+        for name, live_input, expected in S16_PROMPT_CASES:
+            payload: Dict[str, Any] = {"name": name}
+            if live_input is not None:
+                payload["input"] = live_input
+            capture = LLMCapture()
+            with skill_patches(capture):
+                r = await ctx.client.post("/skills/run", headers=hdr(uid), json=payload)
+            first_system = (
+                str(capture.calls[0][0].get("content") or "") if capture.calls else ""
+            )
+            checks.append((f"{name} run 200", r.status_code == 200))
+            checks.append((f"{name} has the new sentence", expected in first_system))
+            for rule in S16_RULE_LINES:
+                checks.append((f"{name} keeps rule {rule!r}", rule in first_system))
+
+        # explain-simply needs its analogy, so it must NOT carry the no-examples ban.
+        explain_capture = LLMCapture()
+        with skill_patches(explain_capture):
+            r_explain = await ctx.client.post(
+                "/skills/run",
+                headers=hdr(uid),
+                json={"name": "explain-simply", "input": "conditional probability"},
+            )
+        explain_system = (
+            str(explain_capture.calls[0][0].get("content") or "")
+            if explain_capture.calls
+            else ""
+        )
+        checks.append(("explain-simply run 200", r_explain.status_code == 200))
+        checks.append(
+            (
+                "explain-simply has NO no-examples ban",
+                "Never add examples" not in explain_system,
+            )
+        )
+        for rule in S16_RULE_LINES:
+            checks.append((f"explain-simply keeps rule {rule!r}", rule in explain_system))
+
+        ok = all(passed for _n, passed in checks)
+        detail = ", ".join(f"{n}={'ok' if p else 'BAD'}" for n, p in checks)
+        return _result(
+            "S16",
+            "Prompt contract",
+            "no-invention and second-person lines present; explain-simply exempt",
+            f"{len(checks)} checks",
+            ok,
+            detail,
+        )
+    finally:
+        await drop_user(uid)
+
+
+# ---------------------------------------------------------------------------
 # S13  --live: real LLM calls (run once, by hand)
 # ---------------------------------------------------------------------------
 
@@ -1268,10 +1354,68 @@ async def seed_store_for_live(uid: int, now: datetime) -> None:
 
 
 # ---------------------------------------------------------------------------
+# S17  --live: replies use no pipes, no third person, no raw field names
+# ---------------------------------------------------------------------------
+
+S17_FORBIDDEN = ("|", "the user ", "reason=")
+
+S17_RUNS = [
+    ("weekly-review", None),
+    ("open-loops", None),
+    ("stress-test-idea", "switch the whole project to SQLite"),
+]
+
+
+async def s17_live_plain_text(ctx: Ctx) -> Dict[str, Any]:
+    uid = await new_user("s17")
+    try:
+        reset_rate_limits()
+        now = datetime.now(IST)
+        await seed_store_for_live(uid, now)
+        statuses: List[int] = []
+        offenders_by_skill: Dict[str, List[str]] = {}
+        for name, live_input in S17_RUNS:
+            payload: Dict[str, Any] = {"name": name}
+            if live_input is not None:
+                payload["input"] = live_input
+            print(f"\n      --- S17 live {name} (input={live_input!r}) ---")
+            r = await ctx.client.post(
+                "/skills/run", headers=hdr(uid), json=payload, timeout=180.0
+            )
+            statuses.append(r.status_code)
+            reply = str((r.json() or {}).get("reply") or "")
+            print(f"      status={r.status_code}")
+            print(reply)
+            offenders = [token for token in S17_FORBIDDEN if token in reply.lower()]
+            offenders_by_skill[name] = offenders
+            if offenders:
+                print(f"      [{name}] FAIL: found {offenders!r}")
+            else:
+                print(f"      [{name}] PASS: no forbidden substring")
+
+        all_200 = all(status == 200 for status in statuses)
+        all_clean = all(not found for found in offenders_by_skill.values())
+        detail = ", ".join(
+            f"{name}={'ok' if not offenders_by_skill[name] else 'BAD ' + repr(offenders_by_skill[name])}"
+            for name, _inp in S17_RUNS
+        )
+        return _result(
+            "S17",
+            "Live plain-text replies",
+            "no '|', no 'the user ', no 'reason=' in three live replies",
+            detail,
+            all_200 and all_clean,
+            "live run; per-skill verdicts printed above",
+        )
+    finally:
+        await drop_user(uid)
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
-ORDER = [f"S{i}" for i in range(1, 13)] + ["S14", "S15"]
+ORDER = [f"S{i}" for i in range(1, 13)] + ["S14", "S15", "S16"]
 
 FUNCS = {
     "S1": s1_list,
@@ -1289,6 +1433,8 @@ FUNCS = {
     "S13": s13_live,
     "S14": s14_grouped_blocks,
     "S15": s15_dates_and_phrasings,
+    "S16": s16_prompt_contract,
+    "S17": s17_live_plain_text,
 }
 
 
@@ -1305,7 +1451,7 @@ async def main() -> None:
         "DATABASE_URL",
     )
 
-    order = ["S13"] if args.live else ORDER
+    order = ["S13", "S17"] if args.live else ORDER
     only = None
     if args.only:
         only = [x.strip().upper() for x in args.only.split(",") if x.strip()]

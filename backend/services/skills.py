@@ -395,8 +395,10 @@ If the instruction block is empty or unreadable, say plainly that nothing could 
 WEEKLY_REVIEW_TASK_PROMPT = """Task: write the user's weekly review from the data blocks.
 Sections, in this order, each introduced by a plain "Label:" line:
 "Overdue:", "Coming up (7 days):", "Decisions this week:", "Suggested adjustments:".
+For "Decisions this week:", Write each decision in the second person ("you decided ..."), never "the user decided".
 Suggested adjustments: at most 3 items, phrased only as suggestions.
 Each suggested adjustment must name a specific task or decision from the data blocks. If there is nothing specific to suggest, write exactly "nothing to adjust". Never give generic productivity advice.
+Never add examples, analogies, hypothetical situations or invented context.
 The <tasks> block is already grouped by code. Copy every item of a group under the matching section. Only write 'nothing found' when the group says (none).
 Hard rule: completion dates are NOT stored, so never claim wins, progress, velocity, or what was completed this week. Never say "you completed" or "you made progress". If a section has no items, say "nothing found".
 """
@@ -404,13 +406,14 @@ Hard rule: completion dates are NOT stored, so never claim wins, progress, veloc
 DAY_PLAN_TASK_PROMPT = """Task: write today's plan from the data blocks.
 Sections: "Must do:" (at most 3 items), "If time:" (at most 3 items), "Can slip:".
 Each item is one line with a short reason.
+Each reason must come only from the data (for example 'overdue by 2 days' or 'due today'). Never add examples, analogies, hypothetical situations or invented context, and never write 'e.g.'.
 No time blocks and no durations are stored, so never invent times or durations.
 The <tasks> block is already grouped by code. Copy every item of a group under the matching section. Only write 'nothing found' when the group says (none).
 """
 
 OPEN_LOOPS_TASK_PROMPT = """Task: list the user's open loops from the data blocks.
-One item per line, plain text: what it is, its origin, and one suggested next step.
-State when each task is due using the phrase given in the data ('overdue by N days', 'due in N days'). If the task has no due date, say 'no due date'.
+Write each item as one plain sentence: what it is, when it's due (using the phrase given in the data), and one suggested next step. Never use a pipe character "|" and never print raw field names like "origin promise" or "origin manual" — describe the origin in plain words only if it adds something (e.g. "a promise you made"), otherwise omit it.
+Never add examples, analogies, hypothetical situations or invented context.
 The <open_loops> block gives the pending or tentative items and their count.
 The <tasks> block is already grouped by code. Copy every item of a group under the matching section. Only write 'nothing found' when the group says (none).
 """
@@ -434,6 +437,7 @@ Follow any stated preference in the data about length or examples over the defau
 DECISION_RECALL_TASK_PROMPT = """Task: recall the user's decisions from the data blocks.
 For each decision give the decision, its reason when one is recorded, and its date.
 Never claim an outcome and never compare expected against actual: outcomes are not stored. When no reason is recorded, say so.
+Write each decision in the second person ('you decided to ...'), never 'the user decided'.
 """
 
 GOAL_BREAKDOWN_TASK_PROMPT = """Task: break the goal in <user_input> into concrete tasks, using the data blocks as context.
@@ -445,7 +449,7 @@ Resolve relative dates such as 'by Friday' or 'next week' to a real YYYY-MM-DD u
 
 STRESS_TEST_TASK_PROMPT = """Task: stress-test the idea in <user_input> using the data blocks.
 Sections: "Assumptions to check:", "Top 3 failure modes:", "Conflicts with your stored decisions:", "Hardening steps:".
-In the conflicts section use ONLY decisions that actually appear in the data blocks; when none appear, write exactly "none found".
+In the conflicts section use ONLY decisions that actually appear in the data blocks; when none appear, write exactly "none found". Write each stored decision in the second person ('you decided ...'). Write each conflicting decision as one plain sentence combining the decision and its reason with a connecting word (e.g. "you decided X because Y"). Never use a pipe character "|" or the literal word "reason=".
 Do not flatter, and disagree when the data supports it.
 """
 
