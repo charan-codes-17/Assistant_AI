@@ -483,3 +483,124 @@ export function rejectBatch(recordIds: number[]): Promise<BatchRejectResponse> {
     body: JSON.stringify({ record_ids: recordIds }),
   });
 }
+
+// ---------------------------------------------------------------------------
+// Skills
+// Mirrors backend/api/schemas.py Skill* models. Field caps are shared by the UI and the client.
+// ---------------------------------------------------------------------------
+
+export const SKILL_NAME_MAX = 40;
+export const SKILL_NAME_PATTERN = "^[a-z0-9][a-z0-9_-]{1,39}$";
+export const SKILL_DESCRIPTION_MAX = 200;
+export const SKILL_INSTRUCTIONS_MAX = 1500;
+export const SKILL_INPUT_MAX = 2000;
+
+export type SkillInputMode = "required" | "optional" | "none";
+
+/** One skill as listed by GET /skills. Built-ins have no id and always report their own input. */
+export type SkillOut = {
+  id: number | null;
+  name: string;
+  description: string;
+  input: SkillInputMode;
+  builtin: boolean;
+};
+
+export type SkillRunRequest = {
+  name: string;
+  input: string;
+};
+
+/** Mirrors SkillRunResponse; memory_used and trace reuse the same shapes /chat returns. */
+export type SkillRunResponse = {
+  turn_id: string;
+  skill: string;
+  reply: string;
+  memory_used: MemoryUsedItem[];
+  trace: TraceInfo;
+  pending_tasks_count: number;
+};
+
+export type SkillCreateRequest = {
+  name: string;
+  description: string;
+  instructions: string;
+};
+
+/** Mirrors SkillCreatedResponse. The instructions are never echoed back. */
+export type SkillCreatedResponse = {
+  id: number;
+  name: string;
+  description: string;
+  builtin: boolean;
+};
+
+export type SkillDeleteResponse = {
+  id: number;
+  status: string;
+};
+
+/**
+ * Carries the backend's own `detail` for skill creation. `request` deliberately drops the body,
+ * but the create page shows the real reason (409 duplicate name, 422 reserved/secret/empty),
+ * so createSkill reads it while keeping the same credentials and headers as every other call.
+ */
+export class ApiDetailError extends Error {
+  readonly status: number;
+  readonly detail: string;
+
+  constructor(status: number, detail: string) {
+    super(`request failed with status ${status}`);
+    this.name = "ApiDetailError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+/** GET /skills. Eight built-ins first, then the caller's own user-defined skills. */
+export function getSkills(): Promise<SkillOut[]> {
+  return request<SkillOut[]>("/skills");
+}
+
+/** POST /skills/run. Built-in names win; unknown names and other users' skills both 404. */
+export function runSkill(name: string, input = ""): Promise<SkillRunResponse> {
+  return request<SkillRunResponse>("/skills/run", {
+    method: "POST",
+    body: JSON.stringify({ name, input }),
+  });
+}
+
+/**
+ * POST /skills. Reads the backend's `detail` on failure so the page can show the real reason
+ * instead of a generic error. Auth is attached exactly like `request` (same-origin cookie).
+ */
+export async function createSkill(payload: SkillCreateRequest): Promise<SkillCreatedResponse> {
+  const response = await fetch("/api/skills", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (response.status === 401) {
+    throw new AuthError();
+  }
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (typeof body?.detail === "string") {
+        detail = body.detail;
+      }
+    } catch {
+      // A non-JSON error body leaves detail empty; the page falls back to a generic message.
+    }
+    throw new ApiDetailError(response.status, detail);
+  }
+  return (await response.json()) as SkillCreatedResponse;
+}
+
+/** DELETE /skills/{id}. Only the caller's own user-defined skills exist as rows. */
+export function deleteSkill(skillId: number): Promise<SkillDeleteResponse> {
+  return request<SkillDeleteResponse>(`/skills/${skillId}`, { method: "DELETE" });
+}
