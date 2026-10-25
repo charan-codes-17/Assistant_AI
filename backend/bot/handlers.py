@@ -25,16 +25,31 @@ from sqlalchemy import func, or_, select
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+from backend.api.followups import store as followup_store
 from backend.bot import state as state_module
 from backend.bot import textfmt
 from backend.config.settings import settings
 from backend.database import AsyncSessionLocal
-from backend.models.models import ConversationSession, KnowledgeRecord, Task, User
+from backend.models.models import (
+    ConversationSession,
+    KnowledgeRecord,
+    Task,
+    User,
+    UserSkill,
+)
 from backend.services import actions as actions_service
 from backend.services import audio as audio_service
 from backend.services import embeddings as embeddings_service
 from backend.services import memory_search
 from backend.services import orchestrator
+from backend.services.skills import (
+    BUILTIN_SKILLS,
+    BUILTIN_SKILL_NAMES,
+    SkillInputRequiredError,
+    SkillNotFoundError,
+    SkillRateLimitedError,
+    run_skill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +82,8 @@ HELP_TEXT = (
     "/newsession - start a new conversation session\n"
     "/quiet - turn reminders on or off\n"
     "/memory <topic> - search your saved memories\n"
+    "/skills - list available skills\n"
+    "/skill <name> [input] - run a skill\n"
     "/forget - delete everything and your account\n"
     "/help - show this list"
 )
@@ -93,6 +110,18 @@ CONTRADICTION_HEADER = "Heads up: this may conflict with something you told me e
 NOTICE_FIELD_CHARS = 200
 _SAVED = "Saved ✅"
 _DISCARDED = "Discarded ❌"
+
+# Skills commands (/skills, /skill). The not-found and rate-limit texts mirror the API's own
+# wording (routes_skills.py: 404 detail "not found"; 429 detail "too many skill runs"), but the
+# rate limit is turned into a friendly sentence instead of a raw error.
+SKILLS_BUILTIN_HEADER = "Built-in skills:"
+SKILLS_CUSTOM_HEADER = "Your skills:"
+SKILLS_NO_CUSTOM = "You have no custom skills yet."
+SKILL_NOT_FOUND_TEXT = "not found"
+SKILL_USAGE_TEXT = "Send /skill <name> [input] - for example /skill day-plan"
+SKILL_RATE_LIMITED_TEXT = (
+    "You've run too many skills for now. Please wait a few minutes and try again."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +236,49 @@ def _saved_task_text(task: Any, user: User) -> str:
     if task.due_at is None:
         return f"{_SAVED}\n{task.title} (no due date)"
     return f"{_SAVED}\n{task.title}, due {_format_due(task.due_at, tz_key)}"
+
+
+async def _send_text_chunks(context: Any, chat_id: int, text: str) -> None:
+    """Send plain text, split into Telegram-sized messages instead of truncating it."""
+    body = text if text else " "
+    for chunk in textfmt.chunk_text(body, textfmt.TELEGRAM_MAX_CHARS):
+        await context.bot.send_message(chat_id=chat_id, text=chunk or " ")
+
+
+def _skill_pending_text(candidate: Any) -> str:
+    """The per-candidate prompt for a skill's extracted tasks (goal-breakdown)."""
+    if candidate.due_at is None:
+        return f"Save this task? {candidate.title} (no due date)"
+    return f"Save this task? {candidate.title} (due {candidate.due_at.strftime('%Y-%m-%d')})"
+
+
+def _parse_skill_callback(raw: str) -> tuple[str, int]:
+    """Split a "sk:ok|no:" payload "<turn_id>:<index>"; a bad index becomes -1 (invalid)."""
+    turn_id, _sep, index_raw = raw.rpartition(":")
+    index = _to_int(index_raw)
+    return turn_id, index if index is not None else -1
+
+
+async def _confirm_skill_task(
+    session: Any, user: User, turn_id: str, index: int
+) -> Optional[Task]:
+    """Confirm one skill task candidate through the SAME followup store the API routes use."""
+    entry = followup_store.get(user.id, turn_id)
+    if entry is None or index < 0 or index >= len(entry.task_candidates):
+        return None
+    candidate = entry.task_candidates[index]
+    task = await actions_service.confirm_task_candidate(session, user, candidate)
+    entry.confirmed_indices.add(index)
+    return task
+
+
+def _discard_skill_task(user_id: int, turn_id: str, index: int) -> bool:
+    """Discard one skill task candidate (idempotent, no DB write). False if it is gone."""
+    entry = followup_store.get(user_id, turn_id)
+    if entry is None or index < 0 or index >= len(entry.task_candidates):
+        return False
+    entry.discarded_indices.add(index)
+    return True
 
 
 def _batch_preview(records: list[Any]) -> str:
@@ -706,6 +778,115 @@ async def cmd_memory(update: Any, context: Any, state: Any = None) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# /skills and /skill (skills backend, in-process)
+# ---------------------------------------------------------------------------
+@guarded
+async def cmd_skills(update: Any, context: Any, state: Any = None) -> None:
+    """List the built-in skills first, then the caller's own custom skills."""
+    if not _is_private(update):
+        return
+    chat_id = update.effective_chat.id
+
+    async with AsyncSessionLocal() as session:
+        user = await _user_by_chat(session, chat_id)
+        if user is None:
+            await context.bot.send_message(chat_id=chat_id, text=SIGNUP_PROMPT)
+            return
+        stmt = (
+            select(UserSkill)
+            .where(UserSkill.user_id == user.id)
+            .order_by(UserSkill.name.asc())
+        )
+        custom = list((await session.execute(stmt)).scalars().all())
+
+    lines = [SKILLS_BUILTIN_HEADER]
+    for spec in BUILTIN_SKILLS.values():
+        lines.append(f"{spec.name} - {spec.description}")
+    lines.append("")
+    lines.append(SKILLS_CUSTOM_HEADER)
+    if custom:
+        for row in custom:
+            lines.append(f"{row.name} - {textfmt.strip_markdown(row.description)}")
+    else:
+        lines.append(SKILLS_NO_CUSTOM)
+
+    await _send_text_chunks(context, chat_id, "\n".join(lines))
+
+
+@guarded
+async def cmd_skill(update: Any, context: Any, state: Any = None) -> None:
+    """Run one skill by name. The name must be known before the run is attempted."""
+    if not _is_private(update):
+        return
+    chat_id = update.effective_chat.id
+    raw = getattr(getattr(update, "message", None), "text", "") or ""
+    parts = raw.split(maxsplit=1)
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    if not rest:
+        await context.bot.send_message(chat_id=chat_id, text=SKILL_USAGE_TEXT)
+        return
+
+    name_parts = rest.split(maxsplit=1)
+    name = name_parts[0]
+    skill_input = name_parts[1].strip() if len(name_parts) > 1 else ""
+
+    async with AsyncSessionLocal() as session:
+        user = await _user_by_chat(session, chat_id)
+        if user is None:
+            await context.bot.send_message(chat_id=chat_id, text=SIGNUP_PROMPT)
+            return
+        # Validate the name up front: a built-in, or one of the caller's own rows.
+        known = name in BUILTIN_SKILL_NAMES
+        if not known:
+            row = (
+                await session.execute(
+                    select(UserSkill.id).where(
+                        UserSkill.user_id == user.id, UserSkill.name == name
+                    )
+                )
+            ).scalar_one_or_none()
+            known = row is not None
+
+    if not known:
+        await context.bot.send_message(chat_id=chat_id, text=SKILL_NOT_FOUND_TEXT)
+        return
+
+    try:
+        result = await run_skill(user.id, name, skill_input)
+    except SkillNotFoundError:
+        await context.bot.send_message(chat_id=chat_id, text=SKILL_NOT_FOUND_TEXT)
+        return
+    except SkillInputRequiredError as exc:
+        await context.bot.send_message(chat_id=chat_id, text=exc.detail)
+        return
+    except SkillRateLimitedError:
+        await context.bot.send_message(chat_id=chat_id, text=SKILL_RATE_LIMITED_TEXT)
+        return
+
+    await _send_text_chunks(context, chat_id, textfmt.strip_markdown(result.reply or ""))
+
+    if result.pending_tasks_count > 0:
+        entry = followup_store.get(user.id, result.turn_id)
+        candidates = list(entry.task_candidates) if entry is not None else []
+        for index, candidate in enumerate(candidates):
+            keyboard = InlineKeyboardMarkup(
+                [[
+                    InlineKeyboardButton(
+                        "✅", callback_data=f"sk:ok:{result.turn_id}:{index}"
+                    ),
+                    InlineKeyboardButton(
+                        "❌", callback_data=f"sk:no:{result.turn_id}:{index}"
+                    ),
+                ]]
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=_skill_pending_text(candidate),
+                reply_markup=keyboard,
+            )
+
+
 @guarded
 async def cmd_forget(update: Any, context: Any, state: Any = None) -> None:
     if not _is_private(update):
@@ -848,6 +1029,28 @@ async def on_callback(update: Any, context: Any, state: Any = None) -> None:
             )
             await _replace_message(
                 context, chat_id, message_id, _DISCARDED if deleted else NOT_AVAILABLE
+            )
+            return
+
+        if data.startswith("sk:ok:"):
+            turn_id, index = _parse_skill_callback(data[len("sk:ok:"):])
+            task = await _confirm_skill_task(session, user, turn_id, index)
+            await _replace_message(
+                context,
+                chat_id,
+                message_id,
+                _saved_task_text(task, user) if task is not None else NOT_AVAILABLE,
+            )
+            return
+
+        if data.startswith("sk:no:"):
+            turn_id, index = _parse_skill_callback(data[len("sk:no:"):])
+            discarded = _discard_skill_task(user.id, turn_id, index)
+            await _replace_message(
+                context,
+                chat_id,
+                message_id,
+                _DISCARDED if discarded else NOT_AVAILABLE,
             )
             return
 

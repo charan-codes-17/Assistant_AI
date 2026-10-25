@@ -38,6 +38,8 @@ def build_application(
         cmd_help,
         cmd_memory,
         cmd_quiet,
+        cmd_skill,
+        cmd_skills,
         cmd_start,
         on_callback,
         on_error,
@@ -64,6 +66,8 @@ def build_application(
     application.add_handler(CommandHandler("quiet", cmd_quiet))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("memory", cmd_memory))
+    application.add_handler(CommandHandler("skills", cmd_skills))
+    application.add_handler(CommandHandler("skill", cmd_skill))
     application.add_handler(CommandHandler("forget", cmd_forget))
     application.add_handler(CallbackQueryHandler(on_callback))
     application.add_handler(MessageHandler(filters.VOICE, on_voice))
