@@ -12,6 +12,16 @@ import type {
 export type RecordState = "saved" | "discarded";
 export type TaskState = "confirmed" | "discarded";
 
+/**
+ * Shared styles for the confirm/discard pairs below. Visual only: teal-primary save, and a
+ * neutral discard that tints rose on hover, matching the Skills page buttons.
+ */
+const BUTTON_SAVE =
+  "rounded-lg border border-teal-700 bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-teal-300 transition-[background-color,border-color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:bg-neutral-800 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50";
+
+const BUTTON_DISCARD =
+  "rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-300 transition-[background-color,border-color,color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:border-rose-700 hover:bg-neutral-800 hover:text-rose-300 active:duration-[var(--dur-press)] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black disabled:opacity-50";
+
 type MessageExtrasProps = {
   memoryUsed: MemoryUsedItem[];
   trace: TraceInfo | null;
@@ -162,17 +172,17 @@ function PendingRecords({
                   type="button"
                   disabled={busy}
                   onClick={() => onRecord(record.id, "save")}
-                  className="rounded-md border border-emerald-800/60 bg-emerald-950/40 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:border-emerald-700 disabled:opacity-50"
+                  className={BUTTON_SAVE}
                 >
-                  ✅ Save
+                  Save
                 </button>
                 <button
                   type="button"
                   disabled={busy}
                   onClick={() => onRecord(record.id, "discard")}
-                  className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                  className={BUTTON_DISCARD}
                 >
-                  ❌ Discard
+                  Discard
                 </button>
               </div>
             )}
@@ -218,17 +228,17 @@ function PendingTasks({
                   type="button"
                   disabled={busy}
                   onClick={() => onTask(task.index, "save")}
-                  className="rounded-md border border-emerald-800/60 bg-emerald-950/40 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:border-emerald-700 disabled:opacity-50"
+                  className={BUTTON_SAVE}
                 >
-                  ✅
+                  Save
                 </button>
                 <button
                   type="button"
                   disabled={busy}
                   onClick={() => onTask(task.index, "discard")}
-                  className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs font-medium text-slate-300 hover:border-slate-600 disabled:opacity-50"
+                  className={BUTTON_DISCARD}
                 >
-                  ❌
+                  Discard
                 </button>
               </div>
             )}

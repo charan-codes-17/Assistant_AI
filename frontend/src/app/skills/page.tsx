@@ -364,6 +364,16 @@ export default function SkillsPage() {
                             }
                             placeholder={requireInput ? "Input required" : "Optional input"}
                             aria-label={`Input for ${skill.name}`}
+                            onKeyDown={(event) => {
+                              if (event.key !== "Enter") {
+                                return;
+                              }
+                              event.preventDefault();
+                              if (card.running || (requireInput && card.input.trim().length === 0)) {
+                                return;
+                              }
+                              void runNow(skill, card.input);
+                            }}
                             className="min-w-48 flex-1 rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-1.5 text-xs text-neutral-100 placeholder:text-neutral-500 outline-none focus:border-neutral-600 focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
                           />
                           <button
@@ -435,9 +445,26 @@ export default function SkillsPage() {
 
                     {card.result ? (
                       <div className="mt-3 rounded-lg border border-neutral-800 bg-neutral-900 p-3">
-                        <p className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
-                          {card.result.reply}
-                        </p>
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="min-w-0 flex-1 whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
+                            {card.result.reply}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              patchCard(skill.name, {
+                                result: null,
+                                followup: null,
+                                taskState: {},
+                                error: null,
+                              })
+                            }
+                            aria-label={`Close ${skill.name} result`}
+                            className="shrink-0 rounded-md border border-neutral-800 bg-neutral-900 px-2 py-0.5 text-xs leading-none text-neutral-400 transition-[background-color,border-color,color,transform] duration-[var(--dur-hover)] ease-[var(--ease-out)] hover:border-neutral-700 hover:text-neutral-200 active:duration-[var(--dur-press)] active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-500 focus-visible:ring-offset-1 focus-visible:ring-offset-black"
+                          >
+                            ✕
+                          </button>
+                        </div>
                         <MessageExtras
                           memoryUsed={card.result.memory_used}
                           trace={card.result.trace}
