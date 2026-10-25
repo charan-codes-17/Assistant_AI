@@ -353,6 +353,81 @@ class OnboardingPromptResponse(BaseModel):
     questions: list[QuestionOut] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Skills
+# ---------------------------------------------------------------------------
+
+SKILL_NAME_MAX = 40
+SKILL_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]{1,39}$"
+SKILL_DESCRIPTION_MAX = 200
+SKILL_INSTRUCTIONS_MAX = 1500
+SKILL_INPUT_MAX = 2000
+SKILL_MAX_PER_USER = 20
+
+
+class SkillOut(BaseModel):
+    """One skill as listed by GET /skills. Built-ins have no id; user skills have no `input` cap
+    beyond the shared run limit, so they always report "optional"."""
+
+    id: int | None = None
+    name: str
+    description: str
+    input: Literal["required", "optional", "none"]
+    builtin: bool
+
+
+class SkillRunRequest(BaseModel):
+    """Run body. `input` is length-capped here and clipped/stripped before it reaches the model."""
+
+    name: str = Field(min_length=1, max_length=SKILL_NAME_MAX)
+    input: str = Field(default="", max_length=SKILL_INPUT_MAX)
+
+    @field_validator("input")
+    @classmethod
+    def _strip_input(cls, value: str) -> str:
+        return value.strip()
+
+
+class SkillRunResponse(BaseModel):
+    """Run result. `memory_used` and `trace` use the same shapes /chat returns; both are empty
+    when the skill did not run a retrieval."""
+
+    turn_id: str
+    skill: str
+    reply: str
+    memory_used: list[MemoryUsedItem] = Field(default_factory=list)
+    trace: TraceInfo = Field(default_factory=TraceInfo)
+    pending_tasks_count: int = 0
+
+
+class SkillCreateRequest(BaseModel):
+    """Create body. The instruction length and the secret backstop are enforced in the route so
+    both produce a 422 with a friendly detail."""
+
+    name: str = Field(pattern=SKILL_NAME_PATTERN, max_length=SKILL_NAME_MAX)
+    description: str = Field(default="", max_length=SKILL_DESCRIPTION_MAX)
+    instructions: str = Field(min_length=1, max_length=SKILL_INSTRUCTIONS_MAX)
+
+    @field_validator("name", "description", "instructions")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        return value.strip()
+
+
+class SkillCreatedResponse(BaseModel):
+    """Create result. `instructions` are never echoed back."""
+
+    id: int
+    name: str
+    description: str
+    builtin: bool = False
+
+
+class SkillDeleteResponse(BaseModel):
+    id: int
+    status: str
+
+
 # STATEMENT_MAX_CHARS is re-exported for documentation/tests parity with the service.
 __all__ = [
     "CHAT_TEXT_MAX",
@@ -369,6 +444,12 @@ __all__ = [
     "CONVERSATION_MESSAGE_MAX",
     "CONVERSATION_DEFAULT_LIMIT",
     "CONVERSATION_MAX_LIMIT",
+    "SKILL_NAME_MAX",
+    "SKILL_NAME_PATTERN",
+    "SKILL_DESCRIPTION_MAX",
+    "SKILL_INSTRUCTIONS_MAX",
+    "SKILL_INPUT_MAX",
+    "SKILL_MAX_PER_USER",
     "HealthResponse",
     "SessionNewResponse",
     "MeResponse",
@@ -401,4 +482,10 @@ __all__ = [
     "OnboardingQuestionnaireRequest",
     "QuestionOut",
     "OnboardingPromptResponse",
+    "SkillOut",
+    "SkillRunRequest",
+    "SkillRunResponse",
+    "SkillCreateRequest",
+    "SkillCreatedResponse",
+    "SkillDeleteResponse",
 ]

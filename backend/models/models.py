@@ -51,6 +51,7 @@ class User(Base):
     tasks: Mapped[List["Task"]] = relationship(back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
     conversations: Mapped[List["Conversation"]] = relationship(back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
     profile_summary: Mapped[Optional["ProfileSummary"]] = relationship(back_populates="user", uselist=False, cascade="all, delete-orphan", passive_deletes=True)
+    user_skills: Mapped[List["UserSkill"]] = relationship(back_populates="user", cascade="all, delete-orphan", passive_deletes=True)
 
 
 class LinkCode(Base):
@@ -236,5 +237,25 @@ class ChatMessage(Base):
     __table_args__ = (
         sa.CheckConstraint("role IN ('user', 'assistant')", name="ck_chat_messages_role"),
         Index("ix_chat_messages_conversation_id_created_at", "conversation_id", "created_at"),
+    )
+
+
+class UserSkill(Base):
+    """A user-defined skill. Built-in skills live in a Python registry, never in this table."""
+
+    __tablename__ = "user_skills"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(40), nullable=False)
+    description: Mapped[str] = mapped_column(String(200), nullable=False, default="", server_default="")
+    # The API caps this at 1500 characters; Text keeps the migration simple and additive.
+    instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    user: Mapped["User"] = relationship(back_populates="user_skills")
+
+    __table_args__ = (
+        sa.UniqueConstraint("user_id", "name", name="uq_user_skills_user_id_name"),
     )
 
