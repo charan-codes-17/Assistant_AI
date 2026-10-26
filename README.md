@@ -1,182 +1,142 @@
-# Persistent-Memory Personal AI Assistant
+# Personal AI: a friend that remembers what matters
 
-> **Nebius x NVIDIA Global AI Hackathon — Personal AI Track**
+A personal AI assistant with **persistent, structured memory**. You talk to it on **Telegram** (text or voice notes) or on a **web app**. It remembers what matters, reminds you of your promises, and stays quiet when it has nothing useful to say.
 
-> [!WARNING]
-> **DEMO ONLY — DO NOT SEND REAL PERSONAL DATA.**
-> This is a hackathon demonstration system. Do not transmit, import, or store any sensitive personal data, credentials, real addresses, confidential documents, or financial information.
+Built for the **Nebius x NVIDIA Global AI Hackathon, Personal AI track**.
 
----
+- Demo video: https://youtu.be/Gzjdfl_CE3c
+- Web app: https://assistant-ai-gamma.vercel.app/
+- Telegram bot: https://t.me/urmemory_assistant_bot
+- License: MIT
 
-## 1. Overview
-
-A personal AI assistant with **persistent, structured memory** accessible via **Telegram (text or voice notes)** and a companion **web app** featuring a Memory Inspector.
-
-Unlike chatbots that forget everything across sessions, this assistant:
-1. **Extracts structured memories** from user conversations.
-2. **Stores memories in PostgreSQL with vector embeddings** (via `pgvector`).
-3. **Decides when to retrieve relevant memories** in subsequent sessions using LLM judgment.
-4. **Decides proactive interventions** (weaving context into replies, flagging contradictions, tracking promises).
-
-Powered by **NVIDIA Nemotron models served via Nebius Token Factory**.
+> **Demo only. Please do not send real personal data.**
 
 ---
 
-## 2. Architecture
+## What it does
 
-```text
-User on Telegram (text / voice)          User on web (browser)
- ↓                                        ↓
-Telegram Bot worker (python-telegram-bot) Next.js Frontend (thin chat + Memory Inspector)
- ↓ voice → faster-whisper (local STT)     ↓
- └────────────────┬───────────────────────┘
-                  ↓
-         FastAPI Backend API
-                  ↓
-         Shared Service Layer
-          ├── Input Router (Nemotron fast tier)
-          ├── Memory Extraction & Deduplication (Nemotron fast tier + Nebius embeddings)
-          ├── Relevance Retrieval (pgvector + Nemotron reasoning tier)
-          ├── Intervention & Contradiction Detection (Nemotron reasoning tier)
-          └── Action Executor & APScheduler (prompts, promises, background triggers)
-                  ↓
-         PostgreSQL 16 + pgvector
-```
+- **Chat on Telegram or web.** Send text, or a voice note on Telegram. Voice is turned into text first, and the bot shows "Heard: ..." so you can see mistakes.
+- **Structured memory, not chat logs.** The assistant extracts memories (knowledge, decisions, preferences) with a certainty level and where they came from.
+- **You confirm before saving.** Every new memory waits for one tap (Save / Edit / Discard). Unconfirmed memories are never used.
+- **Recall across sessions.** In a new session, the assistant finds related memories, judges if they are relevant, and shows a **confidence %** on Telegram replies with a "Show source" button.
+- **Promise tracking.** Say "I'll send Arun the PDF tomorrow". It becomes a task with a due date, and you get one reminder before it is due.
+- **Skills.** 8 built-in skills (`weekly-review`, `day-plan`, `open-loops`, `topic-brief`, `explain-simply`, `decision-recall`, `goal-breakdown`, `stress-test-idea`) and your own custom skills. Skills only read your memory. Only `goal-breakdown` can suggest tasks, and you confirm those with one tap.
+- **You control your data.** Telegram commands: `/memory`, `/forget` (two steps), `/newsession`, `/skills`, `/skill`. The web app has a Memory page, a Tasks page and a chat history sidebar.
 
----
+## Where Nemotron and Nebius Token Factory are used
 
-## 3. Project Structure
+All AI judgment runs on **NVIDIA Nemotron 3 Super** (`nvidia/nemotron-3-super-120b-a12b`) served by **Nebius Token Factory** through its OpenAI-compatible API.
 
-```text
-.
-├── backend/
-│   ├── api/          # FastAPI REST endpoints
-│   ├── bot/          # Telegram bot worker
-│   ├── config/       # Pydantic settings & environment configuration
-│   └── services/     # Shared AI/ML services (router, extraction, retrieval, intervention)
-├── frontend/         # Next.js 14+ (App Router, TypeScript, Tailwind)
-├── docker/           # Docker setup and database initialization scripts
-├── docs/             # PRD and build roadmap
-├── docker-compose.yml
-├── LICENSE           # MIT License
-└── README.md
-```
+| Step | Model | Service |
+|---|---|---|
+| Input router (question / note / command) | Nemotron 3 Super | Token Factory |
+| Memory extraction and dedupe | Nemotron 3 Super | Token Factory |
+| Relevance judgment with confidence | Nemotron 3 Super | Token Factory |
+| Intervention decision (remind / surface / none) | Nemotron 3 Super | Token Factory |
+| Chat replies and tool calling | Nemotron 3 Super | Token Factory |
+| Skills | Nemotron 3 Super | Token Factory |
+| Memory embeddings | Qwen3-Embedding-8B, 1024 dimensions | Token Factory |
 
----
+One model is used for everything, to keep the system simple. Speech-to-text is local (`faster-whisper`), not Nemotron.
 
-## 4. Quick Start (Development)
+## How it works
 
-### Prerequisites
-- Python 3.11+
-- Node.js 20+
-- Docker & Docker Compose
-- Nebius Token Factory API Key
-- Telegram Bot Token (from BotFather)
+1. A message arrives from Telegram or the web.
+2. The router decides what it is.
+3. The assistant may look up memory (vector search in Postgres with pgvector, then a relevance check).
+4. The reply is written, with the memories it used.
+5. New memories are extracted and wait for your confirmation.
+6. A background scheduler checks task due dates and sends one reminder.
 
-### Environment Configuration
-Copy `.env.example` to `.env` and fill in your keys:
+## Tech stack
+
+- **Backend:** Python, FastAPI, SQLAlchemy 2.0 (async), Alembic, `openai` SDK, `python-telegram-bot` (long polling), APScheduler, `faster-whisper`
+- **Database:** PostgreSQL with pgvector (hosted on Neon)
+- **Frontend:** Next.js, React, TypeScript, Tailwind CSS
+- **Hosting:** Railway (API and bot), Vercel (frontend), Neon (database)
+
+## Setup
+
+You need: Python 3.11+, Node.js 20+, a Postgres database with the `vector` extension (Neon works), a Nebius Token Factory API key, and a Telegram bot token from BotFather.
+
+### 1. Clone
+
 ```bash
-cp .env.example .env
+git clone https://github.com/charan-codes-17/Assistant_AI.git
+cd Assistant_AI
 ```
 
-### Start Database
-```bash
-docker compose up -d
-```
+### 2. Create your Telegram bot
 
-### Start Backend API
+1. In Telegram, open **@BotFather** and send `/newbot`.
+2. Follow the steps and copy the bot token.
+3. Use a separate bot for local testing. Only one process can poll a bot token at a time.
+
+### 3. Backend
+
 ```bash
 cd backend
 python -m venv venv
-# Windows:
-.\venv\Scripts\activate
-# Linux/macOS:
-source venv/bin/activate
-
+venv\Scripts\activate        # Windows. On Mac/Linux: source venv/bin/activate
 pip install -r requirements.txt
-uvicorn api.main:app --reload --port 8000
+cp .env.example .env         # Windows PowerShell: Copy-Item .env.example .env
 ```
-Verify the API health check at [http://localhost:8000/health](http://localhost:8000/health).
 
-### Start Frontend
+Open `.env` and fill in your own values: the database URL, `NEBIUS_API_KEY`, `TELEGRAM_BOT_TOKEN`, the JWT secret, and `INVITE_CODES` (the codes people use to sign up). Also set both chat model variables to the model this project uses:
+
+```
+CHAT_MODEL_FAST=nvidia/nemotron-3-super-120b-a12b
+CHAT_MODEL_REASONING=nvidia/nemotron-3-super-120b-a12b
+```
+
+Embeddings use `Qwen/Qwen3-Embedding-8B` with `EMBEDDING_DIM=1024`.
+
+Create the tables, then start the API:
+
+```bash
+alembic upgrade head
+uvicorn api.main:app --reload
+```
+
+To run the Telegram bot together with the API, set `BOT_ENABLED=true` in `.env` before starting.
+
+Check it works: open http://localhost:8000/health
+
+### 4. Frontend
+
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
-Visit [http://localhost:3000](http://localhost:3000).
 
----
+The web app sends `/api/*` requests to the backend API. Open http://localhost:3000, sign up with one of your invite codes, and start chatting.
 
-## 5. Deploy (Railway container + hosted Postgres)
+## For judges
 
-The backend ships as a single container built from the repo-root `Dockerfile`
-(base image `python:3.12-slim`). `railway.toml` selects the Dockerfile builder and
-health-checks `GET /health`.
+Login details and a quick tour are in the **judges-only file on the Devpost submission**. No passwords or invite codes are stored in this repository.
 
-### Build notes
-- The image installs dependencies from `backend/requirements.lock` (exact pinned versions).
-- The build **bakes both Whisper models** into the image at build time, into
-  `/app/whisper_models/whisper-small` and `/app/whisper_models/whisper-base` (plain
-  folders, no symlinks). This layer comes before the application code, so code changes
-  do not re-download the models. At runtime the app reads `WHISPER_MODEL_ROOT`.
-- The container runs as a non-root user. No secrets are baked into the image.
+You can also make your own account:
+- **Web:** open the web app, choose Sign up, and use an invite code from the judges file.
+- **Telegram:** open the bot and send `/start <invite code>`.
 
-### Start command
-The container's entrypoint is `backend/deploy/start_api.sh`, which runs migrations and
-then serves the API:
+## Security notes
 
-```bash
-sh backend/deploy/start_api.sh
-# -> alembic upgrade head
-# -> exec uvicorn backend.api.main:app --host 0.0.0.0 --port ${PORT:-8000}
-```
+- No API keys or bot tokens are in the repo or the frontend bundle. Secrets live only in environment variables.
+- Sign-up needs an invite code, and the demo is limited to 25 users.
+- Passwords are hashed. Login attempts are throttled. Skills are limited to 10 runs per 10 minutes per user.
 
-`alembic upgrade head` must succeed first; if it fails the container exits non-zero.
-There is no `--reload`.
+## Honest limits
 
-### Environment variables for the API service (names only; set values in the platform)
-Required:
-- `APP_ENV` — must be `production` in the cloud.
-- `DATABASE_URL` — Postgres async connection string (hosted, with the `vector` extension).
-- `NEBIUS_API_KEY`
-- `CHAT_MODEL_FAST`
-- `CHAT_MODEL_REASONING`
-- `EMBEDDING_MODEL`
-- `EMBEDDING_DIM`
+- **Logout does not revoke tokens on the server.** Tokens expire on their own.
+- **Skill results are not saved.** They disappear when you reload or switch chat.
+- **Voice transcripts can have mistakes.** That is why the bot shows "Heard: ..." and asks before saving.
+- Only the features described above are built.
 
-Optional (sensible defaults exist):
-- `NEBIUS_BASE_URL`
-- `CHAT_MODEL_TOOLCALL`
-- `EMBEDDING_TIMEOUT_SECONDS`, `EMBEDDING_HEDGE_SECONDS`, `EMBEDDING_BATCH_TIMEOUT_SECONDS`
-- `RETRIEVAL_TOP_K`, `RETRIEVAL_MIN_SIMILARITY`, `RELEVANCE_MIN_CONFIDENCE`,
-  `RETRIEVAL_TIMEOUT_SECONDS`
-- `DEDUPE_THRESHOLD`, `PENDING_DEDUPE_TTL_HOURS`
-- `ONBOARDING_MAX_CHARS`, `ONBOARDING_MAX_CANDIDATES`
-- `WHISPER_MODEL_NAME` (defaults to `small`; `base` is also baked)
-- `WHISPER_MODEL_ROOT` (the image sets this to `/app/whisper_models`)
-- `REMINDER_LEAD_MINUTES`, `INTERVENTION_TIMEOUT_SECONDS`
+## What's next
 
-`TELEGRAM_BOT_TOKEN` is **not** required by the API service (only the bot worker needs it).
+Morning brief, a richer memory timeline, and an easier way to link Telegram and web accounts.
 
-### Security notes
-- The development identity seam (`X-Dev-User-Id` header) only works when
-  `APP_ENV == "development"`. In production (`APP_ENV=production`) that header is
-  **rejected** (the request is treated as unauthenticated). The default `APP_ENV` is
-  `dev`, which also fails closed for the seam.
-- API docs (`/docs`) are only exposed in development.
-- CORS is disabled for the API.
+## License
 
-### Verifying a deploy (skeleton smoke test)
-`backend/scripts/deploy_smoke.py` runs the same checks locally and inside the container
-(runtime, required settings, DB latency, pgvector, migration head, embedding, chat, and
-one end-to-end orchestrator turn). It creates and removes a throwaway user and never
-prints secret values. `backend/scripts/whisper_probe.py --model small|base` measures
-Whisper load time, transcribe time and peak RSS against the baked models.
-
----
-
-## 6. License
-
-This project is licensed under the terms of the [MIT License](LICENSE).
-
+MIT. See the [LICENSE](LICENSE) file.
